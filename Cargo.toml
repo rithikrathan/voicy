@@ -1,0 +1,17 @@
+[package]
+name = "voicy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+cpal = "0.15"
+sherpa-rs = { version = "0.6.8", default-features = false, features = ["download-binaries"] }
+ctrlc = "3.4"
+rubato = "0.15"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
