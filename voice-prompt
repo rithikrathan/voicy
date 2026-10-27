@@ -1,0 +1,37 @@
+#!/bin/bash
+AUDIO_FILE="/tmp/voice_prompt.wav"
+PID_FILE="/tmp/voice_prompt.pid"
+DAEMON_URL="http://127.0.0.1:29541"
+
+# Handle discard / cancel flag (--d, -d, --discard, -c, --cancel)
+if [[ "$1" == "-d" || "$1" == "--d" || "$1" == "--discard" || "$1" == "-c" || "$1" == "--cancel" ]]; then
+    if [ -f "$PID_FILE" ]; then
+        PID=$(cat "$PID_FILE")
+        kill -15 "$PID" 2>/dev/null
+        rm -f "$PID_FILE"
+        rm -f "$AUDIO_FILE"
+    fi
+    exit 0
+fi
+
+# Toggle recording: if already recording, stop, transcribe, type and press Enter
+if [ -f "$PID_FILE" ]; then
+    PID=$(cat "$PID_FILE")
+    kill -15 "$PID" 2>/dev/null
+    rm -f "$PID_FILE"
+    sleep 0.15
+
+    if [ -f "$AUDIO_FILE" ]; then
+        TEXT=$(curl -s --connect-timeout 8 -X POST -d "$AUDIO_FILE" "$DAEMON_URL")
+        if [ -n "$TEXT" ]; then
+            wtype -d 10 "$TEXT" 2>/dev/null && wtype -k Return 2>/dev/null || (ydotool type "$TEXT" && ydotool key 28:1 28:0)
+        fi
+        rm -f "$AUDIO_FILE"
+    fi
+    exit 0
+fi
+
+# Start recording using native PipeWire pw-record
+rm -f "$AUDIO_FILE"
+pw-record --rate 16000 --channels 1 --format s16 "$AUDIO_FILE" >/dev/null 2>&1 &
+echo $! > "$PID_FILE"
