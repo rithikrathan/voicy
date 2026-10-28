@@ -38,6 +38,8 @@ enum Commands {
     Cancel,
     /// Query daemon status
     Status,
+    /// Stream live JSON status updates for ashell / waybar widgets
+    Watch,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -76,14 +78,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let res = ipc::send_command(&socket_path, "STATUS")?;
             println!("{}", res.trim());
         }
+        Commands::Watch => {
+            run_watch(&socket_path)?;
+        }
     }
 
     Ok(())
 }
 
+fn run_watch(socket_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    let mut last_state = String::new();
+
+    loop {
+        let current_state = match ipc::send_command(socket_path, "STATUS") {
+            Ok(s) => s.trim().to_string(),
+            Err(_) => "offline".to_string(),
+        };
+
+        if current_state != last_state {
+            match current_state.as_str() {
+                "recording" => {
+                    println!("{{\"text\": \"Listening...\", \"alt\": \"recording\", \"class\": \"recording\"}}");
+                }
+                "transcribing" => {
+                    println!("{{\"text\": \"Transcribing...\", \"alt\": \"transcribing\", \"class\": \"transcribing\"}}");
+                }
+                _ => {
+                    // Blank when idle or offline to keep the taskbar clean
+                    println!("{{\"text\": \"\", \"alt\": \"idle\", \"class\": \"idle\"}}");
+                }
+            }
+            let _ = std::io::stdout().flush();
+            last_state = current_state;
+        }
+
+        std::thread::sleep(Duration::from_millis(150));
+    }
+}
+
 fn start_worker_thread(
     model_dir: PathBuf,
     rx: Receiver<Vec<f32>>,
+    is_transcribing: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         println!("[voicy] [worker] Loading Whisper INT8 model from {}...", model_dir.display());
@@ -99,26 +135,17 @@ fn start_worker_thread(
         };
 
         while let Ok(samples) = rx.recv() {
-            // Safety: ignore accidental micro-taps under 0.25 seconds (< 4000 samples at 16kHz)
             if samples.len() < 4000 {
-                println!(
-                    "[voicy] [worker] Audio snippet too short ({:.2}s), ignoring tap.",
-                    samples.len() as f32 / 16000.0
-                );
                 continue;
             }
 
-            // Safety: calculate RMS energy to discard complete silence
             let sum_sq: f32 = samples.iter().map(|&s| s * s).sum();
             let rms = (sum_sq / samples.len() as f32).sqrt();
             if rms < 0.003 {
-                println!(
-                    "[voicy] [worker] Audio below silence threshold (RMS: {:.5}), skipping.",
-                    rms
-                );
                 continue;
             }
 
+            is_transcribing.store(true, Ordering::SeqCst);
             println!(
                 "[voicy] [worker] Transcribing {} audio samples ({:.2}s)...",
                 samples.len(),
@@ -128,7 +155,6 @@ fn start_worker_thread(
             match whisper_engine.transcribe(&samples) {
                 Ok(text) => {
                     let trimmed = text.trim();
-                    // Filter common Whisper silence hallucinations
                     if trimmed.is_empty()
                         || trimmed.eq_ignore_ascii_case("you")
                         || trimmed.eq_ignore_ascii_case("you.")
@@ -136,18 +162,17 @@ fn start_worker_thread(
                         || trimmed.eq_ignore_ascii_case("[blank_audio]")
                     {
                         println!("[voicy] [worker] Discarded hallucination token: \"{}\"", trimmed);
-                        continue;
+                    } else {
+                        println!("[voicy] [worker] Result: \"{}\"", trimmed);
+                        output::deliver_text(trimmed);
                     }
-
-                    println!("[voicy] [worker] Result: \"{}\"", trimmed);
-                    output::deliver_text(trimmed);
-
-                    std::thread::sleep(Duration::from_millis(150));
                 }
                 Err(e) => eprintln!("[voicy] [worker] Transcription error: {}", e),
             }
+
+            is_transcribing.store(false, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(150));
         }
-        println!("[voicy] [worker] Inference queue channel closed. Worker exiting.");
     })
 }
 
@@ -159,8 +184,9 @@ fn run_daemon(
 
     let model_dir = custom_model_dir.unwrap_or_else(|| PathBuf::from(config::MODEL_DEFAULT_DIR));
     let (tx, rx): (Sender<Vec<f32>>, Receiver<Vec<f32>>) = mpsc::channel();
+    let is_transcribing = Arc::new(AtomicBool::new(false));
 
-    let _worker_handle = start_worker_thread(model_dir, rx);
+    let _worker_handle = start_worker_thread(model_dir, rx, Arc::clone(&is_transcribing));
 
     println!("[voicy] Initializing audio recorder...");
     let mut recorder = audio::AudioRecorder::new()?;
@@ -269,6 +295,8 @@ fn run_daemon(
             "STATUS" => {
                 let state = if recorder.is_recording() {
                     "recording\n"
+                } else if is_transcribing.load(Ordering::SeqCst) {
+                    "transcribing\n"
                 } else {
                     "idle\n"
                 };
