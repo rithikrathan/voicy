@@ -98,21 +98,23 @@ fn run_watch(socket_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         if current_state != last_state {
             match current_state.as_str() {
                 "recording" => {
-                    println!("{{\"text\": \"Listening...\", \"alt\": \"recording\", \"class\": \"recording\"}}");
+                    println!("{{\"text\": \" Listening...\", \"alt\": \"recording\", \"class\": \"recording\"}}");
                 }
                 "transcribing" => {
-                    println!("{{\"text\": \"Transcribing...\", \"alt\": \"transcribing\", \"class\": \"transcribing\"}}");
+                    println!("{{\"text\": \" Transcribing...\", \"alt\": \"transcribing\", \"class\": \"transcribing\"}}");
+                }
+                "typing" => {
+                    println!("{{\"text\": \" Typing...\", \"alt\": \"typing\", \"class\": \"typing\"}}");
                 }
                 _ => {
-                    // Blank when idle or offline to keep the taskbar clean
-                    println!("{{\"text\": \"\", \"alt\": \"idle\", \"class\": \"idle\"}}");
+                    println!("{{\"text\": \" Ready\", \"alt\": \"idle\", \"class\": \"idle\"}}");
                 }
             }
             let _ = std::io::stdout().flush();
             last_state = current_state;
         }
 
-        std::thread::sleep(Duration::from_millis(150));
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -120,6 +122,7 @@ fn start_worker_thread(
     model_dir: PathBuf,
     rx: Receiver<Vec<f32>>,
     is_transcribing: Arc<AtomicBool>,
+    is_typing: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         println!("[voicy] [worker] Loading Whisper INT8 model from {}...", model_dir.display());
@@ -154,6 +157,7 @@ fn start_worker_thread(
 
             match whisper_engine.transcribe(&samples) {
                 Ok(text) => {
+                    is_transcribing.store(false, Ordering::SeqCst);
                     let trimmed = text.trim();
                     if trimmed.is_empty()
                         || trimmed.eq_ignore_ascii_case("you")
@@ -164,13 +168,17 @@ fn start_worker_thread(
                         println!("[voicy] [worker] Discarded hallucination token: \"{}\"", trimmed);
                     } else {
                         println!("[voicy] [worker] Result: \"{}\"", trimmed);
+                        is_typing.store(true, Ordering::SeqCst);
                         output::deliver_text(trimmed);
+                        is_typing.store(false, Ordering::SeqCst);
                     }
                 }
-                Err(e) => eprintln!("[voicy] [worker] Transcription error: {}", e),
+                Err(e) => {
+                    is_transcribing.store(false, Ordering::SeqCst);
+                    eprintln!("[voicy] [worker] Transcription error: {}", e);
+                }
             }
 
-            is_transcribing.store(false, Ordering::SeqCst);
             std::thread::sleep(Duration::from_millis(150));
         }
     })
@@ -185,8 +193,14 @@ fn run_daemon(
     let model_dir = custom_model_dir.unwrap_or_else(|| PathBuf::from(config::MODEL_DEFAULT_DIR));
     let (tx, rx): (Sender<Vec<f32>>, Receiver<Vec<f32>>) = mpsc::channel();
     let is_transcribing = Arc::new(AtomicBool::new(false));
+    let is_typing = Arc::new(AtomicBool::new(false));
 
-    let _worker_handle = start_worker_thread(model_dir, rx, Arc::clone(&is_transcribing));
+    let _worker_handle = start_worker_thread(
+        model_dir,
+        rx,
+        Arc::clone(&is_transcribing),
+        Arc::clone(&is_typing),
+    );
 
     println!("[voicy] Initializing audio recorder...");
     let mut recorder = audio::AudioRecorder::new()?;
@@ -297,6 +311,8 @@ fn run_daemon(
                     "recording\n"
                 } else if is_transcribing.load(Ordering::SeqCst) {
                     "transcribing\n"
+                } else if is_typing.load(Ordering::SeqCst) {
+                    "typing\n"
                 } else {
                     "idle\n"
                 };
