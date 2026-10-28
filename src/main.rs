@@ -2,7 +2,6 @@ mod audio;
 mod config;
 mod ipc;
 mod output;
-mod sound;
 mod whisper;
 
 use clap::{Parser, Subcommand};
@@ -143,7 +142,6 @@ fn start_worker_thread(
                     println!("[voicy] [worker] Result: \"{}\"", trimmed);
                     output::deliver_text(trimmed);
 
-                    // Add padding after delivering text before the next queued item
                     std::thread::sleep(Duration::from_millis(150));
                 }
                 Err(e) => eprintln!("[voicy] [worker] Transcription error: {}", e),
@@ -162,7 +160,6 @@ fn run_daemon(
     let model_dir = custom_model_dir.unwrap_or_else(|| PathBuf::from(config::MODEL_DEFAULT_DIR));
     let (tx, rx): (Sender<Vec<f32>>, Receiver<Vec<f32>>) = mpsc::channel();
 
-    // Start background inference worker
     let _worker_handle = start_worker_thread(model_dir, rx);
 
     println!("[voicy] Initializing audio recorder...");
@@ -171,7 +168,6 @@ fn run_daemon(
     let listener = ipc::connect_or_clean(&socket_path)?;
     println!("[voicy] Listening on Unix socket: {}", socket_path.display());
 
-    // Clean socket on SIGINT / SIGTERM
     let sock_for_cleanup = socket_path.clone();
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
@@ -206,7 +202,6 @@ fn run_daemon(
 
         let command = line.trim();
         match command {
-            // Push-to-talk: START (strictly idempotent - ignores repeats)
             "START" => {
                 if recorder.is_recording() {
                     let _ = stream.write_all(b"already_recording\n");
@@ -214,7 +209,6 @@ fn run_daemon(
                     println!("[voicy] Start recording (PTT)...");
                     match recorder.start() {
                         Ok(_) => {
-                            sound::play_start_sound();
                             let _ = stream.write_all(b"recording\n");
                         }
                         Err(e) => {
@@ -226,7 +220,6 @@ fn run_daemon(
                 let _ = stream.flush();
             }
 
-            // Push-to-talk: STOP (pushes to queue immediately and frees recorder)
             "STOP" => {
                 if recorder.is_recording() {
                     println!("[voicy] Stop recording (PTT). Enqueueing audio buffer...");
@@ -240,7 +233,6 @@ fn run_daemon(
                 }
             }
 
-            // Toggle mode
             "TOGGLE" => {
                 if recorder.is_recording() {
                     println!("[voicy] Stop recording requested (toggle). Enqueueing audio buffer...");
@@ -252,7 +244,6 @@ fn run_daemon(
                     println!("[voicy] Start recording requested (toggle).");
                     match recorder.start() {
                         Ok(_) => {
-                            sound::play_start_sound();
                             let _ = stream.write_all(b"recording\n");
                         }
                         Err(e) => {
@@ -264,7 +255,6 @@ fn run_daemon(
                 }
             }
 
-            // Cancel: discards current recording immediately
             "CANCEL" => {
                 if recorder.is_recording() {
                     recorder.cancel();
