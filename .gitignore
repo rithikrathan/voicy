@@ -4,7 +4,6 @@ Cargo.lock
 
 # Temporary & audio caches
 *.wav
-*.mp3
 *.flac
 *.sock
 *.pid
@@ -13,6 +12,9 @@ Cargo.lock
 *.swp
 *.swo
 *.log
+
+# Ignore extra audio experiment files in assets except ui/
+src/assets/*.mp3
 
 # System files
 .DS_Store
