@@ -26,6 +26,10 @@ enum Commands {
         #[arg(short, long)]
         model_dir: Option<PathBuf>,
     },
+    /// Push-to-talk: start recording (safe & idempotent, ignores repeats)
+    Start,
+    /// Push-to-talk: stop recording, transcribe, and type out text
+    Stop,
     /// Toggle recording: starts if idle, stops and types if recording
     Toggle,
     /// Cancel current recording without transcribing
@@ -41,6 +45,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Daemon { model_dir } => {
             run_daemon(model_dir, socket_path)?;
+        }
+        Commands::Start => {
+            let res = ipc::send_command(&socket_path, "START")?;
+            if !res.trim().is_empty() && res.trim() != "recording" && res.trim() != "already_recording" {
+                println!("{}", res.trim());
+            }
+        }
+        Commands::Stop => {
+            let res = ipc::send_command(&socket_path, "STOP")?;
+            if !res.trim().is_empty() && res.trim() != "transcribing" && res.trim() != "idle" {
+                println!("{}", res.trim());
+            }
         }
         Commands::Toggle => {
             let res = ipc::send_command(&socket_path, "TOGGLE")?;
@@ -115,29 +131,52 @@ fn run_daemon(
 
         let command = line.trim();
         match command {
-            "TOGGLE" => {
+            // Push-to-talk: START (strictly idempotent - ignores repeats)
+            "START" => {
                 if recorder.is_recording() {
-                    println!("[voicy] Stop recording requested. Extracting audio...");
+                    // Already recording: do not reset or restart the audio stream
+                    let _ = stream.write_all(b"already_recording\n");
+                } else {
+                    println!("[voicy] Start recording (PTT)...");
+                    match recorder.start() {
+                        Ok(_) => {
+                            let _ = stream.write_all(b"recording\n");
+                        }
+                        Err(e) => {
+                            eprintln!("[voicy] Failed to start recording: {}", e);
+                            let _ = stream.write_all(format!("error: {}\n", e).as_bytes());
+                        }
+                    }
+                }
+                let _ = stream.flush();
+            }
+
+            // Push-to-talk: STOP (stops & transcribes if recording; safe no-op if idle)
+            "STOP" => {
+                if recorder.is_recording() {
+                    println!("[voicy] Stop recording (PTT). Extracting audio...");
                     let samples = recorder.stop();
                     let _ = stream.write_all(b"transcribing\n");
                     let _ = stream.flush();
 
-                    if !samples.is_empty() {
-                        println!("[voicy] Transcribing {} audio samples...", samples.len());
-                        match whisper_engine.transcribe(&samples) {
-                            Ok(text) => {
-                                println!("[voicy] Result: \"{}\"", text);
-                                if !text.is_empty() {
-                                    output::deliver_text(&text);
-                                }
-                            }
-                            Err(e) => eprintln!("[voicy] Transcription error: {}", e),
-                        }
-                    } else {
-                        println!("[voicy] Audio buffer was empty.");
-                    }
+                    process_and_deliver(&mut whisper_engine, samples);
                 } else {
-                    println!("[voicy] Start recording requested.");
+                    let _ = stream.write_all(b"idle\n");
+                    let _ = stream.flush();
+                }
+            }
+
+            // Toggle mode (retains backwards compatibility)
+            "TOGGLE" => {
+                if recorder.is_recording() {
+                    println!("[voicy] Stop recording requested (toggle). Extracting audio...");
+                    let samples = recorder.stop();
+                    let _ = stream.write_all(b"transcribing\n");
+                    let _ = stream.flush();
+
+                    process_and_deliver(&mut whisper_engine, samples);
+                } else {
+                    println!("[voicy] Start recording requested (toggle).");
                     match recorder.start() {
                         Ok(_) => {
                             let _ = stream.write_all(b"recording\n");
@@ -150,6 +189,8 @@ fn run_daemon(
                     let _ = stream.flush();
                 }
             }
+
+            // Cancel: discards audio immediately
             "CANCEL" => {
                 if recorder.is_recording() {
                     recorder.cancel();
@@ -160,6 +201,7 @@ fn run_daemon(
                 }
                 let _ = stream.flush();
             }
+
             "STATUS" => {
                 let state = if recorder.is_recording() {
                     "recording\n"
@@ -169,6 +211,7 @@ fn run_daemon(
                 let _ = stream.write_all(state.as_bytes());
                 let _ = stream.flush();
             }
+
             other => {
                 eprintln!("[voicy] Unknown command received: {}", other);
                 let _ = stream.write_all(b"unknown command\n");
@@ -179,4 +222,41 @@ fn run_daemon(
 
     let _ = std::fs::remove_file(&socket_path);
     Ok(())
+}
+
+fn process_and_deliver(whisper_engine: &mut whisper::WhisperEngine, samples: Vec<f32>) {
+    // Safety: ignore accidental micro-taps under 0.25 seconds (< 4000 samples at 16kHz)
+    if samples.len() < 4000 {
+        println!("[voicy] Audio snippet too short ({:.2}s), ignoring tap.", samples.len() as f32 / 16000.0);
+        return;
+    }
+
+    // Safety: calculate RMS energy to discard complete silence
+    let sum_sq: f32 = samples.iter().map(|&s| s * s).sum();
+    let rms = (sum_sq / samples.len() as f32).sqrt();
+    if rms < 0.003 {
+        println!("[voicy] Audio below silence threshold (RMS: {:.5}), skipping.", rms);
+        return;
+    }
+
+    println!("[voicy] Transcribing {} audio samples ({:.2}s)...", samples.len(), samples.len() as f32 / 16000.0);
+    match whisper_engine.transcribe(&samples) {
+        Ok(text) => {
+            let trimmed = text.trim();
+            // Filter common Whisper silence hallucinations
+            if trimmed.is_empty()
+                || trimmed.eq_ignore_ascii_case("you")
+                || trimmed.eq_ignore_ascii_case("you.")
+                || trimmed.eq_ignore_ascii_case("thank you.")
+                || trimmed.eq_ignore_ascii_case("[blank_audio]")
+            {
+                println!("[voicy] Discarded hallucination / silence token: \"{}\"", trimmed);
+                return;
+            }
+
+            println!("[voicy] Result: \"{}\"", trimmed);
+            output::deliver_text(trimmed);
+        }
+        Err(e) => eprintln!("[voicy] Transcription error: {}", e),
+    }
 }
