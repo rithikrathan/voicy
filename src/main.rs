@@ -2,13 +2,16 @@ mod audio;
 mod config;
 mod ipc;
 mod output;
+mod sound;
 mod whisper;
 
 use clap::{Parser, Subcommand};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(name = "voicy")]
@@ -54,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Stop => {
             let res = ipc::send_command(&socket_path, "STOP")?;
-            if !res.trim().is_empty() && res.trim() != "transcribing" && res.trim() != "idle" {
+            if !res.trim().is_empty() && res.trim() != "queued" && res.trim() != "idle" {
                 println!("{}", res.trim());
             }
         }
@@ -79,16 +82,88 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn start_worker_thread(
+    model_dir: PathBuf,
+    rx: Receiver<Vec<f32>>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        println!("[voicy] [worker] Loading Whisper INT8 model from {}...", model_dir.display());
+        let mut whisper_engine = match whisper::WhisperEngine::new(&model_dir) {
+            Ok(engine) => {
+                println!("[voicy] [worker] Whisper model loaded successfully!");
+                engine
+            }
+            Err(e) => {
+                eprintln!("[voicy] [worker] Failed to initialize Whisper model: {}", e);
+                return;
+            }
+        };
+
+        while let Ok(samples) = rx.recv() {
+            // Safety: ignore accidental micro-taps under 0.25 seconds (< 4000 samples at 16kHz)
+            if samples.len() < 4000 {
+                println!(
+                    "[voicy] [worker] Audio snippet too short ({:.2}s), ignoring tap.",
+                    samples.len() as f32 / 16000.0
+                );
+                continue;
+            }
+
+            // Safety: calculate RMS energy to discard complete silence
+            let sum_sq: f32 = samples.iter().map(|&s| s * s).sum();
+            let rms = (sum_sq / samples.len() as f32).sqrt();
+            if rms < 0.003 {
+                println!(
+                    "[voicy] [worker] Audio below silence threshold (RMS: {:.5}), skipping.",
+                    rms
+                );
+                continue;
+            }
+
+            println!(
+                "[voicy] [worker] Transcribing {} audio samples ({:.2}s)...",
+                samples.len(),
+                samples.len() as f32 / 16000.0
+            );
+
+            match whisper_engine.transcribe(&samples) {
+                Ok(text) => {
+                    let trimmed = text.trim();
+                    // Filter common Whisper silence hallucinations
+                    if trimmed.is_empty()
+                        || trimmed.eq_ignore_ascii_case("you")
+                        || trimmed.eq_ignore_ascii_case("you.")
+                        || trimmed.eq_ignore_ascii_case("thank you.")
+                        || trimmed.eq_ignore_ascii_case("[blank_audio]")
+                    {
+                        println!("[voicy] [worker] Discarded hallucination token: \"{}\"", trimmed);
+                        continue;
+                    }
+
+                    println!("[voicy] [worker] Result: \"{}\"", trimmed);
+                    output::deliver_text(trimmed);
+
+                    // Add padding after delivering text before the next queued item
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+                Err(e) => eprintln!("[voicy] [worker] Transcription error: {}", e),
+            }
+        }
+        println!("[voicy] [worker] Inference queue channel closed. Worker exiting.");
+    })
+}
+
 fn run_daemon(
     custom_model_dir: Option<PathBuf>,
     socket_path: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("[voicy] Starting daemon...");
+    println!("[voicy] Starting daemon with asynchronous voice queue...");
 
     let model_dir = custom_model_dir.unwrap_or_else(|| PathBuf::from(config::MODEL_DEFAULT_DIR));
-    println!("[voicy] Loading Whisper INT8 model from {}...", model_dir.display());
-    let mut whisper_engine = whisper::WhisperEngine::new(&model_dir)?;
-    println!("[voicy] Whisper model loaded successfully!");
+    let (tx, rx): (Sender<Vec<f32>>, Receiver<Vec<f32>>) = mpsc::channel();
+
+    // Start background inference worker
+    let _worker_handle = start_worker_thread(model_dir, rx);
 
     println!("[voicy] Initializing audio recorder...");
     let mut recorder = audio::AudioRecorder::new()?;
@@ -134,12 +209,12 @@ fn run_daemon(
             // Push-to-talk: START (strictly idempotent - ignores repeats)
             "START" => {
                 if recorder.is_recording() {
-                    // Already recording: do not reset or restart the audio stream
                     let _ = stream.write_all(b"already_recording\n");
                 } else {
                     println!("[voicy] Start recording (PTT)...");
                     match recorder.start() {
                         Ok(_) => {
+                            sound::play_start_sound();
                             let _ = stream.write_all(b"recording\n");
                         }
                         Err(e) => {
@@ -151,34 +226,33 @@ fn run_daemon(
                 let _ = stream.flush();
             }
 
-            // Push-to-talk: STOP (stops & transcribes if recording; safe no-op if idle)
+            // Push-to-talk: STOP (pushes to queue immediately and frees recorder)
             "STOP" => {
                 if recorder.is_recording() {
-                    println!("[voicy] Stop recording (PTT). Extracting audio...");
+                    println!("[voicy] Stop recording (PTT). Enqueueing audio buffer...");
                     let samples = recorder.stop();
-                    let _ = stream.write_all(b"transcribing\n");
+                    let _ = tx.send(samples);
+                    let _ = stream.write_all(b"queued\n");
                     let _ = stream.flush();
-
-                    process_and_deliver(&mut whisper_engine, samples);
                 } else {
                     let _ = stream.write_all(b"idle\n");
                     let _ = stream.flush();
                 }
             }
 
-            // Toggle mode (retains backwards compatibility)
+            // Toggle mode
             "TOGGLE" => {
                 if recorder.is_recording() {
-                    println!("[voicy] Stop recording requested (toggle). Extracting audio...");
+                    println!("[voicy] Stop recording requested (toggle). Enqueueing audio buffer...");
                     let samples = recorder.stop();
-                    let _ = stream.write_all(b"transcribing\n");
+                    let _ = tx.send(samples);
+                    let _ = stream.write_all(b"queued\n");
                     let _ = stream.flush();
-
-                    process_and_deliver(&mut whisper_engine, samples);
                 } else {
                     println!("[voicy] Start recording requested (toggle).");
                     match recorder.start() {
                         Ok(_) => {
+                            sound::play_start_sound();
                             let _ = stream.write_all(b"recording\n");
                         }
                         Err(e) => {
@@ -190,7 +264,7 @@ fn run_daemon(
                 }
             }
 
-            // Cancel: discards audio immediately
+            // Cancel: discards current recording immediately
             "CANCEL" => {
                 if recorder.is_recording() {
                     recorder.cancel();
@@ -222,41 +296,4 @@ fn run_daemon(
 
     let _ = std::fs::remove_file(&socket_path);
     Ok(())
-}
-
-fn process_and_deliver(whisper_engine: &mut whisper::WhisperEngine, samples: Vec<f32>) {
-    // Safety: ignore accidental micro-taps under 0.25 seconds (< 4000 samples at 16kHz)
-    if samples.len() < 4000 {
-        println!("[voicy] Audio snippet too short ({:.2}s), ignoring tap.", samples.len() as f32 / 16000.0);
-        return;
-    }
-
-    // Safety: calculate RMS energy to discard complete silence
-    let sum_sq: f32 = samples.iter().map(|&s| s * s).sum();
-    let rms = (sum_sq / samples.len() as f32).sqrt();
-    if rms < 0.003 {
-        println!("[voicy] Audio below silence threshold (RMS: {:.5}), skipping.", rms);
-        return;
-    }
-
-    println!("[voicy] Transcribing {} audio samples ({:.2}s)...", samples.len(), samples.len() as f32 / 16000.0);
-    match whisper_engine.transcribe(&samples) {
-        Ok(text) => {
-            let trimmed = text.trim();
-            // Filter common Whisper silence hallucinations
-            if trimmed.is_empty()
-                || trimmed.eq_ignore_ascii_case("you")
-                || trimmed.eq_ignore_ascii_case("you.")
-                || trimmed.eq_ignore_ascii_case("thank you.")
-                || trimmed.eq_ignore_ascii_case("[blank_audio]")
-            {
-                println!("[voicy] Discarded hallucination / silence token: \"{}\"", trimmed);
-                return;
-            }
-
-            println!("[voicy] Result: \"{}\"", trimmed);
-            output::deliver_text(trimmed);
-        }
-        Err(e) => eprintln!("[voicy] Transcription error: {}", e),
-    }
 }
