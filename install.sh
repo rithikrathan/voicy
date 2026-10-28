@@ -20,7 +20,7 @@ if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
 fi
 
 # 2. Build release binary
-echo "🔨 Building Voicy in release mode..."
+echo "Building Voicy in release mode..."
 cargo build --release
 
 # 3. Create destination directories
@@ -32,14 +32,14 @@ SERVICE_DIR="$HOME/.config/systemd/user"
 mkdir -p "$BIN_DIR" "$LIB_DIR" "$SHARE_DIR" "$SERVICE_DIR"
 
 # 4. Copy shared libraries if present in cache/vendor
-echo "📦 Setting up runtime shared libraries..."
+echo "Setting up runtime shared libraries..."
 CACHE_LIB_DIR=$(find "$HOME/.cache/sherpa-rs" -name "libsherpa-onnx-c-api.so" 2>/dev/null | head -n 1 | xargs -r dirname)
 if [ -n "$CACHE_LIB_DIR" ] && [ -d "$CACHE_LIB_DIR" ]; then
     cp -a "$CACHE_LIB_DIR"/* "$LIB_DIR/"
 fi
 
 # 5. Install binary and patch rpath
-echo "🚀 Installing binary to $BIN_DIR/voicy..."
+echo "Installing binary to $BIN_DIR/voicy..."
 systemctl --user stop voicyd.service 2>/dev/null || true
 cp target/release/voicy "$BIN_DIR/voicy"
 chmod +x "$BIN_DIR/voicy"
@@ -48,15 +48,8 @@ if command -v patchelf >/dev/null 2>&1; then
     patchelf --set-rpath '$ORIGIN/../lib/voicy' "$BIN_DIR/voicy" 2>/dev/null || true
 fi
 
-# 6. Install assets
-echo "🔊 Installing sound assets to $SHARE_DIR..."
-if [ -d "src/assets/ui" ]; then
-    mkdir -p "$SHARE_DIR/ui"
-    cp -r src/assets/ui/* "$SHARE_DIR/ui/"
-fi
-
 # 7. Install and enable systemd user service
-echo "⚙️ Configuring systemd user service..."
+echo "Configuring systemd user service..."
 cat << 'EOF' > "$SERVICE_DIR/voicyd.service"
 [Unit]
 Description=Voicy Rust Whisper STT Daemon
