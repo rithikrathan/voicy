@@ -216,7 +216,7 @@ fn run_daemon(
 
     ctrlc::set_handler(move || {
         println!("\n[voicy] Received termination signal. Cleaning up...");
-        sink::restore_system_audio();
+        sink::fade_in_system_audio();
         let _ = std::fs::remove_file(&sock_for_cleanup);
         r.store(false, Ordering::SeqCst);
         std::process::exit(0);
@@ -253,7 +253,7 @@ fn run_daemon(
                     match recorder.start() {
                         Ok(_) => {
                             sound::play_start_sound();
-                            sink::mute_system_audio();
+                            sink::fade_out_system_audio();
                             let _ = stream.write_all(b"recording\n");
                         }
                         Err(e) => {
@@ -268,7 +268,7 @@ fn run_daemon(
             "STOP" => {
                 if recorder.is_recording() {
                     println!("[voicy] Stop recording (PTT). Enqueueing audio buffer...");
-                    sink::restore_system_audio();
+                    sink::fade_in_system_audio();
                     let samples = recorder.stop();
                     let _ = tx.send(samples);
                     let _ = stream.write_all(b"queued\n");
@@ -282,7 +282,7 @@ fn run_daemon(
             "TOGGLE" => {
                 if recorder.is_recording() {
                     println!("[voicy] Stop recording requested (toggle). Enqueueing audio buffer...");
-                    sink::restore_system_audio();
+                    sink::fade_in_system_audio();
                     let samples = recorder.stop();
                     let _ = tx.send(samples);
                     let _ = stream.write_all(b"queued\n");
@@ -292,7 +292,7 @@ fn run_daemon(
                     match recorder.start() {
                         Ok(_) => {
                             sound::play_start_sound();
-                            sink::mute_system_audio();
+                            sink::fade_out_system_audio();
                             let _ = stream.write_all(b"recording\n");
                         }
                         Err(e) => {
@@ -307,7 +307,7 @@ fn run_daemon(
             "CANCEL" => {
                 if recorder.is_recording() {
                     recorder.cancel();
-                    sink::restore_system_audio();
+                    sink::fade_in_system_audio();
                     println!("[voicy] Recording canceled and discarded.");
                     let _ = stream.write_all(b"canceled\n");
                 } else {
@@ -338,7 +338,7 @@ fn run_daemon(
         }
     }
 
-    sink::restore_system_audio();
+    sink::fade_in_system_audio();
     let _ = std::fs::remove_file(&socket_path);
     Ok(())
 }

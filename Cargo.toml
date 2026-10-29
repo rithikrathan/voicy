@@ -9,6 +9,7 @@ cpal = "0.15"
 sherpa-rs = { version = "0.6.8", default-features = false, features = ["download-binaries"] }
 ctrlc = "3.4"
 rubato = "0.15"
+lazy_static = "1.5"
 
 [profile.release]
 opt-level = 3
