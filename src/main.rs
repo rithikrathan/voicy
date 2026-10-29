@@ -250,13 +250,17 @@ fn run_daemon(
                     let _ = stream.write_all(b"already_recording\n");
                 } else {
                     println!("[voicy] Start recording (PTT)...");
+                    // 1. Completely fade out system audio to zero BEFORE opening the mic
+                    sink::fade_out_system_audio_sync();
+                    // 2. Play start sound cue
+                    sound::play_start_sound();
+                    // 3. Open microphone recorder
                     match recorder.start() {
                         Ok(_) => {
-                            sound::play_start_sound();
-                            sink::fade_out_system_audio();
                             let _ = stream.write_all(b"recording\n");
                         }
                         Err(e) => {
+                            sink::fade_in_system_audio();
                             eprintln!("[voicy] Failed to start recording: {}", e);
                             let _ = stream.write_all(format!("error: {}\n", e).as_bytes());
                         }
@@ -268,8 +272,9 @@ fn run_daemon(
             "STOP" => {
                 if recorder.is_recording() {
                     println!("[voicy] Stop recording (PTT). Enqueueing audio buffer...");
-                    sink::fade_in_system_audio();
                     let samples = recorder.stop();
+                    // Fade in system audio AFTER recording has stopped
+                    sink::fade_in_system_audio();
                     let _ = tx.send(samples);
                     let _ = stream.write_all(b"queued\n");
                     let _ = stream.flush();
@@ -282,20 +287,25 @@ fn run_daemon(
             "TOGGLE" => {
                 if recorder.is_recording() {
                     println!("[voicy] Stop recording requested (toggle). Enqueueing audio buffer...");
-                    sink::fade_in_system_audio();
                     let samples = recorder.stop();
+                    // Fade in system audio AFTER recording has stopped
+                    sink::fade_in_system_audio();
                     let _ = tx.send(samples);
                     let _ = stream.write_all(b"queued\n");
                     let _ = stream.flush();
                 } else {
                     println!("[voicy] Start recording requested (toggle).");
+                    // 1. Completely fade out system audio to zero BEFORE opening the mic
+                    sink::fade_out_system_audio_sync();
+                    // 2. Play start sound cue
+                    sound::play_start_sound();
+                    // 3. Open microphone recorder
                     match recorder.start() {
                         Ok(_) => {
-                            sound::play_start_sound();
-                            sink::fade_out_system_audio();
                             let _ = stream.write_all(b"recording\n");
                         }
                         Err(e) => {
+                            sink::fade_in_system_audio();
                             eprintln!("[voicy] Failed to start recording: {}", e);
                             let _ = stream.write_all(format!("error: {}\n", e).as_bytes());
                         }
