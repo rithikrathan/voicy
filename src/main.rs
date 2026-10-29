@@ -3,6 +3,7 @@ mod config;
 mod ipc;
 mod output;
 mod sink;
+mod sound;
 mod whisper;
 
 use clap::{Parser, Subcommand};
@@ -251,6 +252,7 @@ fn run_daemon(
                     println!("[voicy] Start recording (PTT)...");
                     match recorder.start() {
                         Ok(_) => {
+                            sound::play_start_sound();
                             sink::mute_system_audio();
                             let _ = stream.write_all(b"recording\n");
                         }
@@ -289,6 +291,7 @@ fn run_daemon(
                     println!("[voicy] Start recording requested (toggle).");
                     match recorder.start() {
                         Ok(_) => {
+                            sound::play_start_sound();
                             sink::mute_system_audio();
                             let _ = stream.write_all(b"recording\n");
                         }
