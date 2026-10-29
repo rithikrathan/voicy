@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Plays the start sound cue as a Notification-class stream
 pub fn play_start_sound() {
     std::thread::spawn(|| {
-        // Try known asset locations
         let candidates = [
             "/home/rithik/.local/share/voicy/assets/ui/agentPop.mp3",
             "/mnt/sda4/projects/voicy/src/assets/ui/agentPop.mp3",
@@ -19,11 +19,16 @@ pub fn play_start_sound() {
         }
 
         if let Some(path) = sound_path {
-            // Use pw-play or paplay
             let _ = Command::new("pw-play")
+                .arg("--media-role=Notification")
                 .arg(&path)
                 .status()
-                .or_else(|_| Command::new("paplay").arg(&path).status());
+                .or_else(|_| {
+                    Command::new("paplay")
+                        .arg("--property=media.role=notification")
+                        .arg(&path)
+                        .status()
+                });
         }
     });
 }
