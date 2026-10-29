@@ -2,6 +2,7 @@ mod audio;
 mod config;
 mod ipc;
 mod output;
+mod sink;
 mod whisper;
 
 use clap::{Parser, Subcommand};
@@ -52,10 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Start => {
             let res = ipc::send_command(&socket_path, "START")?;
-            if !res.trim().is_empty()
-                && res.trim() != "recording"
-                && res.trim() != "already_recording"
-            {
+            if !res.trim().is_empty() && res.trim() != "recording" && res.trim() != "already_recording" {
                 println!("{}", res.trim());
             }
         }
@@ -107,12 +105,10 @@ fn run_watch(socket_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                     println!("{{\"text\": \" Transcribing...\", \"alt\": \"transcribing\", \"class\": \"transcribing\"}}");
                 }
                 "typing" => {
-                    println!(
-                        "{{\"text\": \" Typing...\", \"alt\": \"typing\", \"class\": \"typing\"}}"
-                    );
+                    println!("{{\"text\": \" Typing...\", \"alt\": \"typing\", \"class\": \"typing\"}}");
                 }
                 _ => {
-                    println!("{{\"text\": \"\", \"alt\": \"idle\", \"class\": \"idle\"}}");
+                    println!("{{\"text\": \" Ready\", \"alt\": \"idle\", \"class\": \"idle\"}}");
                 }
             }
             let _ = std::io::stdout().flush();
@@ -130,10 +126,7 @@ fn start_worker_thread(
     is_typing: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        println!(
-            "[voicy] [worker] Loading Whisper INT8 model from {}...",
-            model_dir.display()
-        );
+        println!("[voicy] [worker] Loading Whisper INT8 model from {}...", model_dir.display());
         let mut whisper_engine = match whisper::WhisperEngine::new(&model_dir) {
             Ok(engine) => {
                 println!("[voicy] [worker] Whisper model loaded successfully!");
@@ -173,10 +166,7 @@ fn start_worker_thread(
                         || trimmed.eq_ignore_ascii_case("thank you.")
                         || trimmed.eq_ignore_ascii_case("[blank_audio]")
                     {
-                        println!(
-                            "[voicy] [worker] Discarded hallucination token: \"{}\"",
-                            trimmed
-                        );
+                        println!("[voicy] [worker] Discarded hallucination token: \"{}\"", trimmed);
                     } else {
                         println!("[voicy] [worker] Result: \"{}\"", trimmed);
                         is_typing.store(true, Ordering::SeqCst);
@@ -217,10 +207,7 @@ fn run_daemon(
     let mut recorder = audio::AudioRecorder::new()?;
 
     let listener = ipc::connect_or_clean(&socket_path)?;
-    println!(
-        "[voicy] Listening on Unix socket: {}",
-        socket_path.display()
-    );
+    println!("[voicy] Listening on Unix socket: {}", socket_path.display());
 
     let sock_for_cleanup = socket_path.clone();
     let running = Arc::new(AtomicBool::new(true));
@@ -228,6 +215,7 @@ fn run_daemon(
 
     ctrlc::set_handler(move || {
         println!("\n[voicy] Received termination signal. Cleaning up...");
+        sink::restore_system_audio();
         let _ = std::fs::remove_file(&sock_for_cleanup);
         r.store(false, Ordering::SeqCst);
         std::process::exit(0);
@@ -263,6 +251,7 @@ fn run_daemon(
                     println!("[voicy] Start recording (PTT)...");
                     match recorder.start() {
                         Ok(_) => {
+                            sink::mute_system_audio();
                             let _ = stream.write_all(b"recording\n");
                         }
                         Err(e) => {
@@ -277,6 +266,7 @@ fn run_daemon(
             "STOP" => {
                 if recorder.is_recording() {
                     println!("[voicy] Stop recording (PTT). Enqueueing audio buffer...");
+                    sink::restore_system_audio();
                     let samples = recorder.stop();
                     let _ = tx.send(samples);
                     let _ = stream.write_all(b"queued\n");
@@ -289,9 +279,8 @@ fn run_daemon(
 
             "TOGGLE" => {
                 if recorder.is_recording() {
-                    println!(
-                        "[voicy] Stop recording requested (toggle). Enqueueing audio buffer..."
-                    );
+                    println!("[voicy] Stop recording requested (toggle). Enqueueing audio buffer...");
+                    sink::restore_system_audio();
                     let samples = recorder.stop();
                     let _ = tx.send(samples);
                     let _ = stream.write_all(b"queued\n");
@@ -300,6 +289,7 @@ fn run_daemon(
                     println!("[voicy] Start recording requested (toggle).");
                     match recorder.start() {
                         Ok(_) => {
+                            sink::mute_system_audio();
                             let _ = stream.write_all(b"recording\n");
                         }
                         Err(e) => {
@@ -314,6 +304,7 @@ fn run_daemon(
             "CANCEL" => {
                 if recorder.is_recording() {
                     recorder.cancel();
+                    sink::restore_system_audio();
                     println!("[voicy] Recording canceled and discarded.");
                     let _ = stream.write_all(b"canceled\n");
                 } else {
@@ -344,6 +335,7 @@ fn run_daemon(
         }
     }
 
+    sink::restore_system_audio();
     let _ = std::fs::remove_file(&socket_path);
     Ok(())
 }
