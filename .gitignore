@@ -24,3 +24,7 @@ Thumbs.db
 # OS/Environment
 .env
 *.local
+
+# Gemini / Agent configuration
+.gemini/
+

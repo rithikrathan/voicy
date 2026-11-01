@@ -5,7 +5,7 @@ echo "=== Voicy Automatic Installer ==="
 
 # 1. Check prerequisites
 MISSING_DEPS=()
-for cmd in cargo rustc wl-copy wtype pw-play; do
+for cmd in cargo rustc wl-copy wtype pw-play playerctl; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         MISSING_DEPS+=("$cmd")
     fi
@@ -16,7 +16,7 @@ if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
     for dep in "${MISSING_DEPS[@]}"; do
         echo "   - $dep"
     done
-    echo "Please ensure they are installed for full functionality (wl-clipboard, wtype, pipewire)."
+    echo "Please ensure they are installed for full functionality (wl-clipboard, wtype, pipewire, playerctl)."
 fi
 
 # 2. Build release binary

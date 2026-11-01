@@ -1,4 +1,5 @@
 mod audio;
+mod audio_preprocessor;
 mod config;
 mod ipc;
 mod output;
@@ -54,7 +55,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Start => {
             let res = ipc::send_command(&socket_path, "START")?;
-            if !res.trim().is_empty() && res.trim() != "recording" && res.trim() != "already_recording" {
+            if !res.trim().is_empty()
+                && res.trim() != "recording"
+                && res.trim() != "already_recording"
+            {
                 println!("{}", res.trim());
             }
         }
@@ -106,10 +110,12 @@ fn run_watch(socket_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                     println!("{{\"text\": \" Transcribing...\", \"alt\": \"transcribing\", \"class\": \"transcribing\"}}");
                 }
                 "typing" => {
-                    println!("{{\"text\": \" Typing...\", \"alt\": \"typing\", \"class\": \"typing\"}}");
+                    println!(
+                        "{{\"text\": \" Typing...\", \"alt\": \"typing\", \"class\": \"typing\"}}"
+                    );
                 }
                 _ => {
-                    println!("{{\"text\": \" Ready\", \"alt\": \"idle\", \"class\": \"idle\"}}");
+                    println!("{{\"text\": \"\", \"alt\": \"idle\", \"class\": \"idle\"}}");
                 }
             }
             let _ = std::io::stdout().flush();
@@ -127,7 +133,10 @@ fn start_worker_thread(
     is_typing: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        println!("[voicy] [worker] Loading Whisper INT8 model from {}...", model_dir.display());
+        println!(
+            "[voicy] [worker] Loading Whisper INT8 model from {}...",
+            model_dir.display()
+        );
         let mut whisper_engine = match whisper::WhisperEngine::new(&model_dir) {
             Ok(engine) => {
                 println!("[voicy] [worker] Whisper model loaded successfully!");
@@ -139,7 +148,8 @@ fn start_worker_thread(
             }
         };
 
-        while let Ok(samples) = rx.recv() {
+        while let Ok(raw_samples) = rx.recv() {
+            let samples = audio_preprocessor::process_audio(&raw_samples);
             if samples.len() < 4000 {
                 continue;
             }
@@ -167,7 +177,10 @@ fn start_worker_thread(
                         || trimmed.eq_ignore_ascii_case("thank you.")
                         || trimmed.eq_ignore_ascii_case("[blank_audio]")
                     {
-                        println!("[voicy] [worker] Discarded hallucination token: \"{}\"", trimmed);
+                        println!(
+                            "[voicy] [worker] Discarded hallucination token: \"{}\"",
+                            trimmed
+                        );
                     } else {
                         println!("[voicy] [worker] Result: \"{}\"", trimmed);
                         is_typing.store(true, Ordering::SeqCst);
@@ -208,7 +221,10 @@ fn run_daemon(
     let mut recorder = audio::AudioRecorder::new()?;
 
     let listener = ipc::connect_or_clean(&socket_path)?;
-    println!("[voicy] Listening on Unix socket: {}", socket_path.display());
+    println!(
+        "[voicy] Listening on Unix socket: {}",
+        socket_path.display()
+    );
 
     let sock_for_cleanup = socket_path.clone();
     let running = Arc::new(AtomicBool::new(true));
@@ -216,7 +232,7 @@ fn run_daemon(
 
     ctrlc::set_handler(move || {
         println!("\n[voicy] Received termination signal. Cleaning up...");
-        sink::fade_in_system_audio();
+        sink::resume_media();
         let _ = std::fs::remove_file(&sock_for_cleanup);
         r.store(false, Ordering::SeqCst);
         std::process::exit(0);
@@ -250,8 +266,8 @@ fn run_daemon(
                     let _ = stream.write_all(b"already_recording\n");
                 } else {
                     println!("[voicy] Start recording (PTT)...");
-                    // 1. Completely fade out system audio to zero BEFORE opening the mic
-                    sink::fade_out_system_audio_sync();
+                    // 1. Pause active media playback before opening the mic
+                    sink::pause_media();
                     // 2. Play start sound cue
                     sound::play_start_sound();
                     // 3. Open microphone recorder
@@ -260,7 +276,7 @@ fn run_daemon(
                             let _ = stream.write_all(b"recording\n");
                         }
                         Err(e) => {
-                            sink::fade_in_system_audio();
+                            sink::resume_media();
                             eprintln!("[voicy] Failed to start recording: {}", e);
                             let _ = stream.write_all(format!("error: {}\n", e).as_bytes());
                         }
@@ -273,8 +289,8 @@ fn run_daemon(
                 if recorder.is_recording() {
                     println!("[voicy] Stop recording (PTT). Enqueueing audio buffer...");
                     let samples = recorder.stop();
-                    // Fade in system audio AFTER recording has stopped
-                    sink::fade_in_system_audio();
+                    // Resume active media playback AFTER recording has stopped
+                    sink::resume_media();
                     let _ = tx.send(samples);
                     let _ = stream.write_all(b"queued\n");
                     let _ = stream.flush();
@@ -286,17 +302,19 @@ fn run_daemon(
 
             "TOGGLE" => {
                 if recorder.is_recording() {
-                    println!("[voicy] Stop recording requested (toggle). Enqueueing audio buffer...");
+                    println!(
+                        "[voicy] Stop recording requested (toggle). Enqueueing audio buffer..."
+                    );
                     let samples = recorder.stop();
-                    // Fade in system audio AFTER recording has stopped
-                    sink::fade_in_system_audio();
+                    // Resume active media playback AFTER recording has stopped
+                    sink::resume_media();
                     let _ = tx.send(samples);
                     let _ = stream.write_all(b"queued\n");
                     let _ = stream.flush();
                 } else {
                     println!("[voicy] Start recording requested (toggle).");
-                    // 1. Completely fade out system audio to zero BEFORE opening the mic
-                    sink::fade_out_system_audio_sync();
+                    // 1. Pause active media playback before opening the mic
+                    sink::pause_media();
                     // 2. Play start sound cue
                     sound::play_start_sound();
                     // 3. Open microphone recorder
@@ -305,7 +323,7 @@ fn run_daemon(
                             let _ = stream.write_all(b"recording\n");
                         }
                         Err(e) => {
-                            sink::fade_in_system_audio();
+                            sink::resume_media();
                             eprintln!("[voicy] Failed to start recording: {}", e);
                             let _ = stream.write_all(format!("error: {}\n", e).as_bytes());
                         }
@@ -317,7 +335,7 @@ fn run_daemon(
             "CANCEL" => {
                 if recorder.is_recording() {
                     recorder.cancel();
-                    sink::fade_in_system_audio();
+                    sink::resume_media();
                     println!("[voicy] Recording canceled and discarded.");
                     let _ = stream.write_all(b"canceled\n");
                 } else {
@@ -348,7 +366,7 @@ fn run_daemon(
         }
     }
 
-    sink::fade_in_system_audio();
+    sink::resume_media();
     let _ = std::fs::remove_file(&socket_path);
     Ok(())
 }
