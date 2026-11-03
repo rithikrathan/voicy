@@ -10,6 +10,8 @@ sherpa-rs = { version = "0.6.8", default-features = false, features = ["download
 ctrlc = "3.4"
 rubato = "0.15"
 lazy_static = "1.5"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
 serde_json = "1.0"
 
 [profile.release]
