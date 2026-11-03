@@ -7,7 +7,32 @@ use std::path::PathBuf;
 
 pub const DEFAULT_SOCKET_NAME: &str = "voicy.sock";
 pub const DEFAULT_CONFIG_FILENAME: &str = "config.toml";
-pub const MODEL_DEFAULT_DIR: &str = "/mnt/sda4/models/sherpa-onnx/sherpa-onnx-whisper-distil-small.en";
+
+pub fn get_default_model_dir(model_name: &str) -> PathBuf {
+    // 1. If /mnt/sda4/models/sherpa-onnx/<name> exists, prefer it
+    let host_path = PathBuf::from("/mnt/sda4/models/sherpa-onnx").join(model_name);
+    if host_path.exists() {
+        return host_path;
+    }
+
+    // 2. Standard XDG data directory (~/.local/share/voicy/models/<name>)
+    if let Ok(data_home) = std::env::var("XDG_DATA_HOME") {
+        PathBuf::from(data_home).join("voicy/models").join(model_name)
+    } else if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".local/share/voicy/models").join(model_name)
+    } else {
+        PathBuf::from("models").join(model_name)
+    }
+}
+
+pub fn get_default_log_file() -> Option<PathBuf> {
+    let dev_log = PathBuf::from("/mnt/sda4/projects/tin/data/test_input.txt");
+    if dev_log.parent().map(|p| p.exists()).unwrap_or(false) {
+        Some(dev_log)
+    } else {
+        None
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelProfile {
@@ -95,6 +120,7 @@ pub struct OutputSettings {
     pub type_to_active_window: bool,
     #[serde(default = "default_bool_true")]
     pub append_to_file: bool,
+    /// Path to append transcriptions for dataset collection. Set to "" or None to disable.
     pub log_file: Option<PathBuf>,
 }
 
@@ -109,7 +135,7 @@ impl Default for OutputSettings {
             copy_to_clipboard: default_bool_true(),
             type_to_active_window: default_bool_true(),
             append_to_file: default_bool_true(),
-            log_file: Some(PathBuf::from("/mnt/sda4/projects/tin/data/test_input.txt")),
+            log_file: get_default_log_file(),
         }
     }
 }
@@ -155,7 +181,7 @@ impl Default for VoicyConfig {
         models.insert(
             "distil-small.en".to_string(),
             ModelProfile {
-                path: PathBuf::from("/mnt/sda4/models/sherpa-onnx/sherpa-onnx-whisper-distil-small.en"),
+                path: get_default_model_dir("sherpa-onnx-whisper-distil-small.en"),
                 encoder: None,
                 decoder: None,
                 tokens: None,
@@ -166,7 +192,7 @@ impl Default for VoicyConfig {
         models.insert(
             "small.en".to_string(),
             ModelProfile {
-                path: PathBuf::from("/mnt/sda4/models/sherpa-onnx/sherpa-onnx-whisper-small.en"),
+                path: get_default_model_dir("sherpa-onnx-whisper-small.en"),
                 encoder: Some("small.en-encoder.int8.onnx".to_string()),
                 decoder: Some("small.en-decoder.int8.onnx".to_string()),
                 tokens: Some("small.en-tokens.txt".to_string()),
@@ -253,7 +279,7 @@ impl VoicyConfig {
         }
 
         let fallback = self.models.get(&self.active_model).cloned().unwrap_or_else(|| ModelProfile {
-            path: PathBuf::from("/mnt/sda4/models/sherpa-onnx/sherpa-onnx-whisper-small.en"),
+            path: get_default_model_dir("sherpa-onnx-whisper-distil-small.en"),
             encoder: None,
             decoder: None,
             tokens: None,

@@ -3,7 +3,7 @@
 > Pair this with the [edge-tts mcp](https://github.com/rithikrathan/mcp) to have hands-off prompting to agents.
 
 > [!NOTE]
-> **Dataset Logging Notice**: The model currently logs all transcriptions into a file for datasets for future fine-tuning. There is currently no option to turn this off without changing the code.
+> **Dataset Logging Notice**: The daemon can automatically log all transcriptions to a file for dataset collection and future fine-tuning. This path is fully configurable in `~/.config/voicy/config.toml` under `log_file`. If set to `""` or omitted, transcription logging is completely disabled.
 
 Voicy is a voice-to-text daemon for Linux Wayland desktops. It records on demand, transcribes speech locally with Whisper, and sends the text where you want it: into the focused window, into a specific tmux pane, to the clipboard, or out over a Unix socket for other programs to consume.
 
@@ -115,6 +115,10 @@ decoder = "small.en-decoder.int8.onnx"
 tokens = "small.en-tokens.txt"
 language = "en"
 num_threads = 4
+
+[output]
+# Path to append transcriptions for dataset collection. Set to "" to disable.
+log_file = "/mnt/sda4/projects/tin/data/test_input.txt" # or "" to disable
 
 [audio]
 sample_rate = 16000

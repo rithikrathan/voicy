@@ -22,23 +22,44 @@ fn get_wayland_display() -> Option<String> {
     None
 }
 
-fn apply_wayland_env(cmd: &mut Command) {
+fn apply_display_env(cmd: &mut Command) {
     if let Some(disp) = get_wayland_display() {
         cmd.env("WAYLAND_DISPLAY", disp);
     }
     if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
         cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     }
+    if let Ok(x11_disp) = std::env::var("DISPLAY") {
+        cmd.env("DISPLAY", x11_disp);
+    }
 }
 
 pub fn copy_to_clipboard(text: &str) {
-    let mut cmd = Command::new("wl-copy");
-    apply_wayland_env(&mut cmd);
-    cmd.stdin(Stdio::piped())
+    // 1. Try wl-copy (Wayland default)
+    let mut wl_cmd = Command::new("wl-copy");
+    apply_display_env(&mut wl_cmd);
+    wl_cmd.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+
+    if let Ok(mut child) = wl_cmd.spawn() {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        if let Ok(status) = child.wait() {
+            if status.success() {
+                return;
+            }
+        }
+    }
+
+    // 2. Fallback to xclip (X11 / universal clipboard)
+    let mut xclip_cmd = Command::new("xclip");
+    apply_display_env(&mut xclip_cmd);
+    xclip_cmd.args(["-selection", "clipboard"])
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
-    if let Ok(mut child) = cmd.spawn() {
+    if let Ok(mut child) = xclip_cmd.spawn() {
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(text.as_bytes());
         }
@@ -47,42 +68,58 @@ pub fn copy_to_clipboard(text: &str) {
 }
 
 pub fn type_text(text: &str) {
-    // 1. Try wtype first with 10ms delay between keys
+    // 1. Try wtype (Wayland wlroots compositor default: Hyprland, Sway, River)
     let mut wtype_cmd = Command::new("wtype");
-    apply_wayland_env(&mut wtype_cmd);
+    apply_display_env(&mut wtype_cmd);
     wtype_cmd.arg("-d").arg("10").arg(text);
 
     if let Ok(status) = wtype_cmd.status() {
         if status.success() {
             let mut ret_cmd = Command::new("wtype");
-            apply_wayland_env(&mut ret_cmd);
+            apply_display_env(&mut ret_cmd);
             let _ = ret_cmd.arg("-k").arg("Return").status();
             return;
         }
     }
 
-    // 2. Fallback to ydotool
+    // 2. Fallback to ydotool (Universal Linux / uinput: works on GNOME Wayland, KDE, Sway, Hyprland)
     let mut ydo_cmd = Command::new("ydotool");
-    apply_wayland_env(&mut ydo_cmd);
+    apply_display_env(&mut ydo_cmd);
     ydo_cmd.arg("type").arg(text);
 
     if let Ok(status) = ydo_cmd.status() {
         if status.success() {
             let mut enter_cmd = Command::new("ydotool");
-            apply_wayland_env(&mut enter_cmd);
+            apply_display_env(&mut enter_cmd);
             let _ = enter_cmd.arg("key").arg("28:1").arg("28:0").status();
+            return;
+        }
+    }
+
+    // 3. Fallback to xdotool (X11 environments)
+    let mut xdo_cmd = Command::new("xdotool");
+    apply_display_env(&mut xdo_cmd);
+    xdo_cmd.args(["type", "--clearmodifiers", text]);
+    if let Ok(status) = xdo_cmd.status() {
+        if status.success() {
+            let mut enter_cmd = Command::new("xdotool");
+            apply_display_env(&mut enter_cmd);
+            let _ = enter_cmd.args(["key", "Return"]).status();
         }
     }
 }
 
-pub fn append_to_test_input(text: &str) {
+pub fn append_to_dataset_log(text: &str, log_file: Option<&Path>) {
+    let path = match log_file {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => return, // Logging disabled if None or empty path
+    };
+
     let single_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if single_line.is_empty() {
         return;
     }
 
-    let path_str = "/mnt/sda4/projects/tin/data/test_input.txt";
-    let path = Path::new(path_str);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -92,18 +129,18 @@ pub fn append_to_test_input(text: &str) {
 }
 
 /// Unified multi-channel delivery router
-pub fn deliver_text(text: &str, is_dictate: bool, target: Option<&str>) {
+pub fn deliver_text(text: &str, is_dictate: bool, target: Option<&str>, log_file: Option<&Path>) {
     if text.trim().is_empty() {
         return;
     }
 
-    // Permanent Invariants (All Modes)
+    // Permanent Invariants (Clipboard + Configurable Dataset Logging)
     copy_to_clipboard(text);
-    append_to_test_input(text);
+    append_to_dataset_log(text, log_file);
 
-    // Channel 1: Dictation Mode (Active Wayland Window typing)
+    // Channel 1: Dictation Mode (Active GUI Window typing)
     if is_dictate {
-        println!("[voicy] [output] Delivering via desktop dictation (wtype)...");
+        println!("[voicy] [output] Delivering via desktop dictation (wtype/ydotool)...");
         type_text(text);
         return;
     }
@@ -125,6 +162,6 @@ pub fn deliver_text(text: &str, is_dictate: bool, target: Option<&str>) {
     }
 
     // Target is None or Tmux failed -> Clean Fallback to Desktop Dictation
-    println!("[voicy] [output] No active target set; falling back to desktop dictation (wtype)...");
+    println!("[voicy] [output] No active target set; falling back to desktop dictation...");
     type_text(text);
 }

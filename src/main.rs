@@ -186,6 +186,7 @@ fn start_worker_thread(
     canceled_task_id: Arc<AtomicU64>,
     active_target: Arc<Mutex<Option<String>>>,
     broadcaster: broadcaster::EventBroadcaster,
+    log_file: Option<PathBuf>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         println!(
@@ -268,7 +269,7 @@ fn start_worker_thread(
                         let target_str = target_lock.as_deref().and_then(|opt| opt.as_deref());
 
                         is_typing.store(true, Ordering::SeqCst);
-                        output::deliver_text(trimmed, task.is_dictate, target_str);
+                        output::deliver_text(trimmed, task.is_dictate, target_str, log_file.as_deref());
                         is_typing.store(false, Ordering::SeqCst);
                     }
                 }
@@ -312,6 +313,7 @@ fn run_daemon(
     let canceled_task_id = Arc::new(AtomicU64::new(0));
     let active_target = Arc::new(Mutex::new(None::<String>));
 
+    let log_file = voicy_cfg.output.log_file.clone();
     let _worker_handle = start_worker_thread(
         model_profile,
         rx,
@@ -320,6 +322,7 @@ fn run_daemon(
         Arc::clone(&canceled_task_id),
         Arc::clone(&active_target),
         event_broadcaster.clone(),
+        log_file,
     );
 
     println!("[voicy] Initializing audio recorder...");

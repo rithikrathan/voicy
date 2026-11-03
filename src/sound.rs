@@ -3,11 +3,14 @@ use std::process::Command;
 
 /// Locates a sound asset across installation and development paths
 pub fn find_sound(names: &[&str]) -> Option<PathBuf> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/rithik".to_string());
-    let mut candidate_dirs = vec![
-        format!("{}/.local/share/voicy/assets/ui", home),
-        "/mnt/sda4/projects/voicy/src/assets/ui".to_string(),
-    ];
+    let mut candidate_dirs = Vec::new();
+
+    if let Ok(data_home) = std::env::var("XDG_DATA_HOME") {
+        candidate_dirs.push(format!("{}/voicy/assets/ui", data_home));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        candidate_dirs.push(format!("{}/.local/share/voicy/assets/ui", home));
+    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
             if let Some(share) = parent.parent().map(|p| p.join("share/voicy/assets/ui")) {
@@ -17,6 +20,8 @@ pub fn find_sound(names: &[&str]) -> Option<PathBuf> {
             }
         }
     }
+    candidate_dirs.push("src/assets/ui".to_string());
+    candidate_dirs.push("/mnt/sda4/projects/voicy/src/assets/ui".to_string());
 
     for dir in &candidate_dirs {
         for name in names {
