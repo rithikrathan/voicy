@@ -1,5 +1,6 @@
+use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 fn get_wayland_display() -> Option<String> {
@@ -74,10 +75,34 @@ pub fn type_text(text: &str) {
     }
 }
 
+pub fn append_to_test_input(text: &str) {
+    let single_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if single_line.is_empty() {
+        return;
+    }
+
+    let candidates = [
+        "/mnt/sda4/projects/tin/data/test_input.txt",
+        "/mnt/sda4/projects/voicy/input.txt",
+    ];
+
+    for path_str in &candidates {
+        let path = Path::new(path_str);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(file, "{}", single_line);
+            break;
+        }
+    }
+}
+
 pub fn deliver_text(text: &str) {
     if text.trim().is_empty() {
         return;
     }
     copy_to_clipboard(text);
     type_text(text);
+    append_to_test_input(text);
 }

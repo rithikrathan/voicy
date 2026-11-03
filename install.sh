@@ -31,7 +31,12 @@ SERVICE_DIR="$HOME/.config/systemd/user"
 
 mkdir -p "$BIN_DIR" "$LIB_DIR" "$SHARE_DIR" "$SERVICE_DIR"
 
-# 4. Copy shared libraries if present in cache/vendor
+# 4. Install audio assets
+echo "Installing UI audio assets to $SHARE_DIR..."
+mkdir -p "$SHARE_DIR/ui"
+cp -a src/assets/ui/* "$SHARE_DIR/ui/" 2>/dev/null || true
+
+# 5. Copy shared libraries if present in cache/vendor
 echo "Setting up runtime shared libraries..."
 CACHE_LIB_DIR=$(find "$HOME/.cache/sherpa-rs" -name "libsherpa-onnx-c-api.so" 2>/dev/null | head -n 1 | xargs -r dirname)
 if [ -n "$CACHE_LIB_DIR" ] && [ -d "$CACHE_LIB_DIR" ]; then
@@ -41,8 +46,7 @@ fi
 # 5. Install binary and patch rpath
 echo "Installing binary to $BIN_DIR/voicy..."
 systemctl --user stop voicyd.service 2>/dev/null || true
-cp target/release/voicy "$BIN_DIR/voicy"
-chmod +x "$BIN_DIR/voicy"
+install -m 755 target/release/voicy "$BIN_DIR/voicy"
 
 if command -v patchelf >/dev/null 2>&1; then
     patchelf --set-rpath '$ORIGIN/../lib/voicy' "$BIN_DIR/voicy" 2>/dev/null || true
