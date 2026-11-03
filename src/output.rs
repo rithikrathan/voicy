@@ -1,3 +1,4 @@
+use crate::tmux;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -10,7 +11,6 @@ fn get_wayland_display() -> Option<String> {
         }
     }
 
-    // Fallback: detect active wayland socket in XDG_RUNTIME_DIR
     if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
         for name in &["wayland-1", "wayland-0"] {
             if PathBuf::from(&runtime_dir).join(name).exists() {
@@ -98,11 +98,40 @@ pub fn append_to_test_input(text: &str) {
     }
 }
 
-pub fn deliver_text(text: &str) {
+/// Unified multi-channel delivery router
+pub fn deliver_text(text: &str, is_dictate: bool, target: Option<&str>) {
     if text.trim().is_empty() {
         return;
     }
+
+    // Permanent Invariants (All Modes)
     copy_to_clipboard(text);
-    type_text(text);
     append_to_test_input(text);
+
+    // Channel 1: Dictation Mode (Active Wayland Window typing)
+    if is_dictate {
+        println!("[voicy] [output] Delivering via desktop dictation (wtype)...");
+        type_text(text);
+        return;
+    }
+
+    // Channel 2: Targeted Mode (Tmux PTY injection with dictation fallback)
+    if let Some(t) = target {
+        if t != "none" && !t.is_empty() {
+            println!("[voicy] [output] Delivering to tmux target '{}'...", t);
+            match tmux::send_keys_to_pane(t, text, true) {
+                Ok(_) => return,
+                Err(e) => {
+                    eprintln!(
+                        "[voicy] [output] Tmux target '{}' failed ({}), falling back to desktop dictation.",
+                        t, e
+                    );
+                }
+            }
+        }
+    }
+
+    // Target is None or Tmux failed -> Clean Fallback to Desktop Dictation
+    println!("[voicy] [output] No active target set; falling back to desktop dictation (wtype)...");
+    type_text(text);
 }
