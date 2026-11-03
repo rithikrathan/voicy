@@ -42,19 +42,31 @@ The CLI talks to the daemon over a Unix socket. Nothing is transcribed inside th
 
 ---
 
-## Requirements
+## Dependencies & Prerequisites
 
-- Rust 1.75 or newer (`cargo`, `rustc`).
-- A Wayland compositor.
-- `wl-clipboard`, `wtype`, `pipewire`, `playerctl`, and `patchelf` for install patching.
-- `aria2c` or `wget` if you want resumable model downloads.
+Voicy requires a few system packages to handle Wayland typing, audio capture, and clipboard synchronization:
+
+| Dependency | Purpose |
+|---|---|
+| **`wtype`** | Simulates virtual keystrokes into active Wayland windows for desktop dictation (or `ydotool` fallback) |
+| **`wl-clipboard`** | Provides `wl-copy` to copy every transcription to the Wayland system clipboard |
+| **`pipewire`** (`pw-play`) | Captures microphone audio and plays notification sound cues |
+| **`playerctl`** | Automatically pauses background music/media playback while recording |
+| **`patchelf`** | Sets runtime dynamic library paths (`RPATH`) for `libsherpa-onnx-c-api.so` |
+| **`tmux`** | Injects text directly into terminal splits via `voicy target here` |
+| **`aria2c`** or **`wget`** | Fast resumable model archive downloading |
+
+### Installation by Distro
 
 ```bash
-# Arch
-sudo pacman -S wl-clipboard wtype pipewire playerctl patchelf
+# Arch Linux
+sudo pacman -S wl-clipboard wtype pipewire playerctl patchelf tmux aria2
 
-# Debian / Ubuntu
-sudo apt install wl-clipboard wtype pipewire playerctl patchelf
+# Debian / Ubuntu (wtype available on modern releases; or use ydotool)
+sudo apt install wl-clipboard wtype pipewire playerctl patchelf tmux aria2
+
+# Fedora
+sudo dnf install wl-clipboard wtype pipewire playerctl patchelf tmux aria2
 ```
 
 ---
