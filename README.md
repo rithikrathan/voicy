@@ -1,5 +1,10 @@
 # Voicy
 
+> Pair this with the [edge-tts mcp](https://github.com/rithikrathan/mcp) to have hands-off prompting to agents.
+
+> [!NOTE]
+> **Dataset Logging Notice**: The model currently logs all transcriptions into a file for datasets for future fine-tuning. There is currently no option to turn this off without changing the code.
+
 Voicy is a voice-to-text daemon for Linux Wayland desktops. It records on demand, transcribes speech locally with Whisper, and sends the text where you want it: into the focused window, into a specific tmux pane, to the clipboard, or out over a Unix socket for other programs to consume.
 
 No cloud service, no audio written to disk, no window stealing. Built in Rust against PipeWire, `sherpa-onnx`, and standard Wayland tools.

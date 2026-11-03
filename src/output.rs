@@ -81,20 +81,13 @@ pub fn append_to_test_input(text: &str) {
         return;
     }
 
-    let candidates = [
-        "/mnt/sda4/projects/tin/data/test_input.txt",
-        "/mnt/sda4/projects/voicy/input.txt",
-    ];
-
-    for path_str in &candidates {
-        let path = Path::new(path_str);
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-            let _ = writeln!(file, "{}", single_line);
-            break;
-        }
+    let path_str = "/mnt/sda4/projects/tin/data/test_input.txt";
+    let path = Path::new(path_str);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{}", single_line);
     }
 }
 

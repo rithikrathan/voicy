@@ -438,9 +438,12 @@ fn run_daemon(
                         active_recording_is_dictate
                     );
                     sink::pause_media();
-                    sound::play_start_sound();
                     match recorder.start() {
                         Ok(_) => {
+                            std::thread::spawn(|| {
+                                std::thread::sleep(Duration::from_millis(500));
+                                sound::play_start_sound();
+                            });
                             start_recording_timer(&mut timer_cancel);
                             let _ = stream.write_all(b"recording\n");
                         }
@@ -502,9 +505,12 @@ fn run_daemon(
                         active_recording_is_dictate
                     );
                     sink::pause_media();
-                    sound::play_start_sound();
                     match recorder.start() {
                         Ok(_) => {
+                            std::thread::spawn(|| {
+                                std::thread::sleep(Duration::from_millis(500));
+                                sound::play_start_sound();
+                            });
                             start_recording_timer(&mut timer_cancel);
                             let _ = stream.write_all(b"recording\n");
                         }
