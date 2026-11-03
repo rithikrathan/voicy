@@ -1,139 +1,200 @@
 # Voicy
 
-A lightweight, blazing-fast, and battery-friendly voice-to-text dictation tool designed specifically for Linux Wayland environments (Hyprland, Sway, etc.) written in pure Rust.
+A lightweight, blazing-fast, and battery-friendly voice-to-text dictation and terminal agent router designed specifically for Linux Wayland environments (Hyprland, Sway, etc.) written in pure Rust.
 
-Voicy uses an offline quantized Whisper model (`sherpa-onnx`) running entirely in-memory with zero disk writes, native PipeWire audio streaming, Unix domain socket IPC, and Wayland virtual keyboard simulation.
-
----
-
-## Features
-
-- **Pure Rust Architecture**: Single unified binary handling both background daemon and CLI hotkey invocations.
-- **Zero Disk I/O**: Captures microphone audio directly into RAM (`Vec<f32>`) and passes it straight to inference without touching the filesystem.
-- **Robust Unix Domain Socket**: Located in `$XDG_RUNTIME_DIR/voicy.sock` (`tmpfs` RAM) with automated stale socket cleanup and PID/instance safety.
-- **Dual Output**: Copies transcribed text to the system clipboard (`wl-copy`) and simulates real keystrokes (`wtype` / `ydotool`) into the active window, followed by `Enter`.
-- **Offline & Private**: Runs completely local using ONNX Runtime quantized models (e.g. Whisper Small INT8).
+Voicy uses an offline quantized Distil-Whisper model (`sherpa-onnx`) running entirely in-memory with zero disk writes during audio capture, native PipeWire audio streaming, Unix domain socket event broadcasting, active tmux session targeting, and Wayland virtual keyboard simulation.
 
 ---
 
-## Architecture
+## Key Features
+
+- **Distil-Whisper INT8 Acceleration**: Transcribes speech at ~0.35x Real-Time Factor (up to 3-4x faster than real-time on CPU) with high technical vocabulary retention from Whisper Large distillation.
+- **Configurable Model Switching (`~/.config/voicy/config.toml`)**: Switch between Distil-Whisper (`distil-small.en`) and vanilla Whisper Small (`small.en`) with automatic ONNX model discovery.
+- **Active Tmux Session Targeting**: Injects transcribed text directly into tmux terminal panes via literal `tmux send-keys` without window-focus hijacking.
+- **Effortless `voicy target here`**: Run `voicy target here` inside any terminal split to immediately lock Voicy's output onto that pane.
+- **Dedicated Desktop Dictation (`--dictate`)**: Pass `--dictate` to type into whatever GUI window is currently focused (`wtype`).
+- **Unix Domain Event Socket (`voicy-events.sock`)**: Broadcasts newline-delimited JSON events to all connected subscriber processes (home server agents, background listeners, or Python scripts) in real-time.
+- **LIFO Stack Cancellation (`voicy cancel`)**: Pressing cancel pops the topmost active action: cancels the active recording buffer if recording (leaving background transcriptions undisturbed), or cancels in-flight transcription if idle.
+- **Defensive Data Invariants**: Transcriptions are always saved to the Wayland clipboard (`wl-copy`) and appended to `/mnt/sda4/projects/tin/data/test_input.txt` and `input.txt`.
+
+---
+
+## Architecture Overview
 
 ```text
-┌─────────────────────────────────────────────────────────────┐
-│                       voicy (Rust binary)                   │
-├──────────────────────────────┬──────────────────────────────┤
-│      1. CLI Client           │        2. Background Daemon   │
-│  - Super+D -> `voicy toggle` │  - Model kept warm in RAM    │
-│  - Super+Shift+D -> `cancel` │  - In-memory mic recording   │
-│  - Talk via Unix Socket      │  - sherpa-onnx Whisper INT8  │
-│    (instant <1ms turnaround) │  - wl-copy + type text       │
-└──────────────────────────────┴──────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│                          voicy (Unified Rust Binary)                   │
+├──────────────────────────────────┬─────────────────────────────────────┤
+│ 1. CLI Commands & Controls       │ 2. Background Daemon (voicyd)       │
+│ - voicy toggle                   │ - In-memory cpal audio recording    │
+│ - voicy toggle --dictate         │ - DSP Preprocessor (HPF + peak norm)│
+│ - voicy target here / clear      │ - Sherpa-ONNX Distil-Whisper INT8   │
+│ - voicy cancel (LIFO stack)      │ - Unix Event Broadcaster Socket     │
+│ - voicy status / watch           │ - Multi-Channel Router (tmux/wtype) │
+└──────────────────────────────────┴─────────────────────────────────────┘
 ```
 
 ---
 
 ## Prerequisites
 
-1. **Rust toolchain** (`cargo`, `rustc`).
-2. **Wayland typing and clipboard tools**:
+1. **Rust Toolchain**: `cargo` and `rustc` (1.75+).
+2. **Wayland & Audio Utilities**:
    ```bash
-   sudo pacman -S wl-clipboard wtype
-   # or on Debian/Ubuntu:
-   sudo apt install wl-clipboard wtype
+   # Arch Linux
+   sudo pacman -S wl-clipboard wtype pipewire playerctl patchelf
+   
+   # Debian / Ubuntu
+   sudo apt install wl-clipboard wtype pipewire playerctl patchelf
    ```
-3. **PipeWire / ALSA** audio subsystem.
-4. **Sherpa ONNX Whisper model**:
-   Download a quantized model (e.g., `sherpa-onnx-whisper-small.en`):
-   - `small.en-encoder.int8.onnx`
-   - `small.en-decoder.int8.onnx`
-   - `small.en-tokens.txt`
+3. **Download Tools** (Optional for faster resumable downloads): `aria2c` or `wget`.
 
 ---
 
-## Installation
+## Quick Installation
+
+Run the automatic installer:
 
 ```bash
-# Clone the repository
-git clone https://github.com/your-username/voicy.git
+git clone https://github.com/rithikrathan/voicy.git
 cd voicy
-
-# Build release binary
-cargo build --release
-
-# Install binary to ~/.local/bin
-cp target/release/voicy ~/.local/bin/
+chmod +x install.sh
+./install.sh
 ```
+
+The installer will:
+1. Verify system tools.
+2. Auto-download and extract the pre-quantized Distil-Whisper model (~432MB) if missing.
+3. Build the release binary with full optimizations and Link-Time Optimization (LTO).
+4. Install the binary to `~/.local/bin/voicy`.
+5. Install and start the systemd user service `voicyd.service`.
 
 ---
 
-## Usage
+## Manual Model Download & Setup
 
-### 1. Run the Daemon
+If you prefer to download the models manually:
+
 ```bash
-# Start the daemon pointing to your model folder
-voicy daemon --model-dir /path/to/sherpa-onnx-whisper-small.en
+# Create models directory
+mkdir -p /mnt/sda4/models/sherpa-onnx
+cd /mnt/sda4/models/sherpa-onnx
 
-# Or use the default location (/mnt/sda4/models/sherpa-onnx/sherpa-onnx-whisper-small.en)
-voicy daemon
+# Download pre-quantized Distil-Whisper Small INT8
+wget -c https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-distil-small.en.tar.bz2
+
+# Extract
+tar -xjf sherpa-onnx-whisper-distil-small.en.tar.bz2
 ```
-
-### 2. Control Commands (Hotkeys)
-- **Toggle Recording:**
-  ```bash
-  voicy toggle
-  ```
-  *(Press once to start recording; press again to stop, transcribe, copy, and type).*
-- **Cancel Recording:**
-  ```bash
-  voicy cancel
-  ```
-  *(Immediately stops and discards any audio without transcribing).*
-- **Check Status:**
-  ```bash
-  voicy status
-  ```
 
 ---
 
-## Hyprland Configuration
+## Configuration (`~/.config/voicy/config.toml`)
 
-Add the following keybindings to your `~/.config/hypr/hyprland.conf` (or `keybinds.conf`):
+Voicy auto-generates a default configuration on first launch:
+
+```toml
+# Active model selection: matches profile key under [models]
+active_model = "distil-small.en"
+
+[models."distil-small.en"]
+path = "/mnt/sda4/models/sherpa-onnx/sherpa-onnx-whisper-distil-small.en"
+language = "en"
+num_threads = 4
+
+[models."small.en"]
+path = "/mnt/sda4/models/sherpa-onnx/sherpa-onnx-whisper-small.en"
+encoder = "small.en-encoder.int8.onnx"
+decoder = "small.en-decoder.int8.onnx"
+tokens = "small.en-tokens.txt"
+language = "en"
+num_threads = 4
+
+[audio]
+sample_rate = 16000
+silence_threshold = 0.003
+enable_high_pass = true
+high_pass_cutoff = 80.0
+enable_peak_norm = true
+peak_target = 0.90
+timeout_seconds = 30
+```
+
+---
+
+## CLI Usage
+
+### Recording & Dictation
+```bash
+# Toggle recording (routes to locked tmux target, or falls back to desktop dictation if null)
+voicy toggle
+
+# Force pure desktop dictation into the focused GUI window
+voicy toggle --dictate
+
+# Push-to-talk controls
+voicy start
+voicy stop
+
+# Cancel topmost active task (LIFO: cancels active recording, or in-flight transcription)
+voicy cancel
+```
+
+### Tmux Targeting
+```bash
+# Lock Voicy output onto the pane you are currently sitting in
+voicy target here
+
+# Lock to a specific pane or session
+voicy target agent:0.1
+voicy target %3
+
+# Clear the target (revert to desktop dictation fallback)
+voicy target clear
+voicy target null
+
+# Display the currently locked target
+voicy target
+```
+
+---
+
+## Unix Domain Event Socket (`voicy-events.sock`)
+
+For external listener scripts, home server agent bridges, or terminal widgets:
+- Socket location: `$XDG_RUNTIME_DIR/voicy-events.sock` (or `/tmp/voicy-events.sock`).
+- Stream format: Newline-delimited JSON.
+
+Example listener in Bash:
+```bash
+nc -U "$XDG_RUNTIME_DIR/voicy-events.sock" | while read -r line; do
+    echo "Received transcription event: $line"
+done
+```
+
+---
+
+## Hyprland Keybindings
+
+Add to `~/.config/hypr/keybinds.conf`:
 
 ```ini
-# Voice-to-text dictation
-bind = Super, D, exec, voicy toggle
-bind = Super+Shift, D, exec, voicy cancel
-```
+# Voice-to-text toggle (Targeted / fallback)
+bind = Super, D, exec, ~/.local/bin/md2tts-stop && ~/.local/bin/voicy toggle
 
----
+# Pure desktop dictation
+bind = Super+Alt, D, exec, ~/.local/bin/md2tts-stop && ~/.local/bin/voicy toggle --dictate
 
-## Systemd User Service
+# LIFO Stack cancel
+bind = Super+Shift, D, exec, ~/.local/bin/voicy cancel
 
-To automatically start `voicy daemon` on login, create `~/.config/systemd/user/voicyd.service`:
-
-```ini
-[Unit]
-Description=Voicy Rust Whisper STT Daemon
-After=pipewire.service sound.target
-
-[Service]
-Type=simple
-ExecStart=%h/.local/bin/voicy daemon
-Restart=on-failure
-RestartSec=1
-
-[Install]
-WantedBy=default.target
-```
-
-Enable and start the service:
-```bash
-systemctl --user daemon-reload
-systemctl --user enable --now voicyd.service
+# Push-to-talk on F12
+bind = , F12, exec, ~/.local/bin/md2tts-stop && ~/.local/bin/voicy start
+bindr = , F12, exec, ~/.local/bin/voicy stop
 ```
 
 ---
 
 ## License
 
-MIT
+MIT License.

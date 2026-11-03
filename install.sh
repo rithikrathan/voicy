@@ -19,31 +19,60 @@ if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
     echo "Please ensure they are installed for full functionality (wl-clipboard, wtype, pipewire, playerctl)."
 fi
 
-# 2. Build release binary
-echo "Building Voicy in release mode..."
-cargo build --release
-
-# 3. Create destination directories
+# 2. Destination directories
 BIN_DIR="$HOME/.local/bin"
 LIB_DIR="$HOME/.local/lib/voicy"
 SHARE_DIR="$HOME/.local/share/voicy/assets"
+MODELS_DIR="$HOME/.local/share/voicy/models"
 SERVICE_DIR="$HOME/.config/systemd/user"
+CONFIG_DIR="$HOME/.config/voicy"
 
-mkdir -p "$BIN_DIR" "$LIB_DIR" "$SHARE_DIR" "$SERVICE_DIR"
+mkdir -p "$BIN_DIR" "$LIB_DIR" "$SHARE_DIR" "$MODELS_DIR" "$SERVICE_DIR" "$CONFIG_DIR"
 
-# 4. Install audio assets
+# 3. Model Verification & Auto-Download
+DISTIL_MODEL_DIR="/mnt/sda4/models/sherpa-onnx/sherpa-onnx-whisper-distil-small.en"
+FALLBACK_MODEL_DIR="$MODELS_DIR/sherpa-onnx-whisper-distil-small.en"
+
+if [ -d "$DISTIL_MODEL_DIR" ]; then
+    echo "Found Distil-Whisper model in $DISTIL_MODEL_DIR"
+elif [ -d "$FALLBACK_MODEL_DIR" ]; then
+    echo "Found Distil-Whisper model in $FALLBACK_MODEL_DIR"
+else
+    echo "Distil-Whisper model not found locally. Downloading pre-quantized INT8 model (~432MB)..."
+    MODEL_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-distil-small.en.tar.bz2"
+    ARCHIVE_PATH="$MODELS_DIR/sherpa-onnx-whisper-distil-small.en.tar.bz2"
+
+    if command -v aria2c >/dev/null 2>&1; then
+        aria2c -c -x 4 -s 4 --auto-file-renaming=false -d "$MODELS_DIR" -o "sherpa-onnx-whisper-distil-small.en.tar.bz2" "$MODEL_URL"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -c -O "$ARCHIVE_PATH" "$MODEL_URL"
+    else
+        curl -L -C - -o "$ARCHIVE_PATH" "$MODEL_URL"
+    fi
+
+    echo "Extracting model archive to $MODELS_DIR..."
+    tar -xjf "$ARCHIVE_PATH" -C "$MODELS_DIR"
+    rm -f "$ARCHIVE_PATH"
+    echo "Model ready at $FALLBACK_MODEL_DIR"
+fi
+
+# 4. Build release binary
+echo "Building Voicy in release mode..."
+cargo build --release
+
+# 5. Install audio assets
 echo "Installing UI audio assets to $SHARE_DIR..."
 mkdir -p "$SHARE_DIR/ui"
 cp -a src/assets/ui/* "$SHARE_DIR/ui/" 2>/dev/null || true
 
-# 5. Copy shared libraries if present in cache/vendor
+# 6. Copy shared libraries if present in cache/vendor
 echo "Setting up runtime shared libraries..."
 CACHE_LIB_DIR=$(find "$HOME/.cache/sherpa-rs" -name "libsherpa-onnx-c-api.so" 2>/dev/null | head -n 1 | xargs -r dirname)
 if [ -n "$CACHE_LIB_DIR" ] && [ -d "$CACHE_LIB_DIR" ]; then
     cp -a "$CACHE_LIB_DIR"/* "$LIB_DIR/"
 fi
 
-# 5. Install binary and patch rpath
+# 7. Install binary and patch rpath
 echo "Installing binary to $BIN_DIR/voicy..."
 systemctl --user stop voicyd.service 2>/dev/null || true
 install -m 755 target/release/voicy "$BIN_DIR/voicy"
@@ -52,7 +81,7 @@ if command -v patchelf >/dev/null 2>&1; then
     patchelf --set-rpath '$ORIGIN/../lib/voicy' "$BIN_DIR/voicy" 2>/dev/null || true
 fi
 
-# 7. Install and enable systemd user service
+# 8. Install and enable systemd user service
 echo "Configuring systemd user service..."
 cat << 'EOF' > "$SERVICE_DIR/voicyd.service"
 [Unit]
@@ -79,6 +108,9 @@ echo "✅ Voicy installed and daemon started successfully!"
 echo "Daemon status: $(systemctl --user is-active voicyd.service)"
 echo ""
 echo "Quick start:"
-echo "   voicy toggle   # Toggle recording"
-echo "   voicy cancel   # Discard active recording"
-echo "   voicy status   # View current state"
+echo "   voicy toggle          # Toggle recording (routes to locked tmux target or dictation fallback)"
+echo "   voicy toggle --dictate # Pure desktop dictation into focused Wayland window"
+echo "   voicy target here     # Lock speech output directly into current tmux pane"
+echo "   voicy target clear    # Clear target (revert to dictation fallback)"
+echo "   voicy cancel          # LIFO cancel (cancels active recording, or in-flight transcription)"
+echo "   voicy status          # View current state"
