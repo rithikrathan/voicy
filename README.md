@@ -4,6 +4,8 @@
 
 > [!NOTE]
 > **Dataset Logging Notice**: The daemon can automatically log all transcriptions to a file for dataset collection and future fine-tuning. This path is fully configurable in `~/.config/voicy/config.toml` under `log_file`. If set to `""` or omitted, transcription logging is completely disabled.
+>
+> **Audio Transcription Limit**: The model is currently limited to 30 seconds of audio transcription per recording due to Whisper's fixed positional embedding window. Audio exceeding 30 seconds is truncated, and a warning cue sounds at 30 seconds. Dynamic silence-valley chunking to remove this blockage is planned for a future release (see [features_future_topics.md](features_future_topics.md)).
 
 Voicy is a voice-to-text daemon for Linux Wayland desktops. It records on demand, transcribes speech locally with Whisper, and sends the text where you want it: into the focused window, into a specific tmux pane, to the clipboard, or out over a Unix socket for other programs to consume.
 

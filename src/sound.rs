@@ -1,48 +1,32 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
-/// Locates a sound asset across installation and development paths
-pub fn find_sound(names: &[&str]) -> Option<PathBuf> {
-    let mut candidate_dirs = Vec::new();
+const SHARE_ASSETS_SUBDIR: &str = ".local/share/voicy/assets/ui";
 
-    if let Ok(data_home) = std::env::var("XDG_DATA_HOME") {
-        candidate_dirs.push(format!("{}/voicy/assets/ui", data_home));
-    }
+fn get_sound_path(filename: &str) -> PathBuf {
     if let Ok(home) = std::env::var("HOME") {
-        candidate_dirs.push(format!("{}/.local/share/voicy/assets/ui", home));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            if let Some(share) = parent.parent().map(|p| p.join("share/voicy/assets/ui")) {
-                if let Some(s) = share.to_str() {
-                    candidate_dirs.push(s.to_string());
-                }
-            }
+        let path = PathBuf::from(home).join(SHARE_ASSETS_SUBDIR).join(filename);
+        if path.exists() {
+            return path;
         }
     }
-    candidate_dirs.push("src/assets/ui".to_string());
-    candidate_dirs.push("/mnt/sda4/projects/voicy/src/assets/ui".to_string());
-
-    for dir in &candidate_dirs {
-        for name in names {
-            let p = Path::new(dir).join(name);
-            if p.exists() {
-                return Some(p);
-            }
-        }
-    }
-    None
+    PathBuf::from("src/assets/ui").join(filename)
 }
 
-fn play_file(path: &Path) {
+fn play_file(filename: &str) {
+    let path = get_sound_path(filename);
+    if !path.exists() {
+        return;
+    }
+
     let _ = Command::new("pw-play")
         .arg("--media-role=Notification")
-        .arg(path)
+        .arg(&path)
         .status()
         .or_else(|_| {
             Command::new("paplay")
                 .arg("--property=media.role=notification")
-                .arg(path)
+                .arg(&path)
                 .status()
         });
 }
@@ -50,34 +34,20 @@ fn play_file(path: &Path) {
 /// Plays the start sound cue as a Notification-class stream
 pub fn play_start_sound() {
     std::thread::spawn(|| {
-        if let Some(path) = find_sound(&["agentPop.mp3"]) {
-            play_file(&path);
-        }
+        play_file("agentPop.mp3");
     });
 }
 
-/// Plays the 30-second warning timeout beep as a subtle Notification-class stream
+/// Plays the 30-second warning timeout beep
 pub fn play_timeout_sound() {
     std::thread::spawn(|| {
-        if let Some(path) = find_sound(&["timeout.mp3", "timeout.wav"]) {
-            play_file(&path);
-        }
+        play_file("timeout.mp3");
     });
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_find_start_sound() {
-        let p = find_sound(&["agentPop.mp3"]);
-        assert!(p.is_some(), "agentPop.mp3 sound asset should exist");
-    }
-
-    #[test]
-    fn test_find_timeout_sound() {
-        let p = find_sound(&["timeout.mp3", "timeout.wav"]);
-        assert!(p.is_some(), "timeout sound asset should exist");
-    }
+/// Plays the delivery confirmation chime
+pub fn play_delivered_sound() {
+    std::thread::spawn(|| {
+        play_file("delivered.mp3");
+    });
 }

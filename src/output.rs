@@ -142,6 +142,7 @@ pub fn deliver_text(text: &str, is_dictate: bool, target: Option<&str>, log_file
     if is_dictate {
         println!("[voicy] [output] Delivering via desktop dictation (wtype/ydotool)...");
         type_text(text);
+        crate::sound::play_delivered_sound();
         return;
     }
 
@@ -150,7 +151,10 @@ pub fn deliver_text(text: &str, is_dictate: bool, target: Option<&str>, log_file
         if t != "none" && !t.is_empty() {
             println!("[voicy] [output] Delivering to tmux target '{}'...", t);
             match tmux::send_keys_to_pane(t, text, true) {
-                Ok(_) => return,
+                Ok(_) => {
+                    crate::sound::play_delivered_sound();
+                    return;
+                }
                 Err(e) => {
                     eprintln!(
                         "[voicy] [output] Tmux target '{}' failed ({}), falling back to desktop dictation.",
@@ -164,4 +168,5 @@ pub fn deliver_text(text: &str, is_dictate: bool, target: Option<&str>, log_file
     // Target is None or Tmux failed -> Clean Fallback to Desktop Dictation
     println!("[voicy] [output] No active target set; falling back to desktop dictation...");
     type_text(text);
+    crate::sound::play_delivered_sound();
 }
