@@ -94,7 +94,7 @@ fn init_player() -> Option<SoundPlayer> {
                                     let volume = match cue {
                                         SoundCue::Start => 0.80,
                                         SoundCue::Timeout => 0.80,
-                                        SoundCue::Delivered => 0.52,
+                                        SoundCue::Delivered => 0.26,
                                     };
                                     sink.set_volume(volume);
                                     sink.append(source);
