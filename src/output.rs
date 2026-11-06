@@ -161,8 +161,6 @@ pub fn deliver_text(
         return;
     }
 
-    // Permanent Invariants (Clipboard + Configurable Dataset Logging)
-    copy_to_clipboard(text);
     append_to_dataset_log(text, log_file);
 
     // Channel 1: Dictation Mode (Active GUI Window typing)

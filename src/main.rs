@@ -351,12 +351,16 @@ fn start_worker_thread(
                     session_transcript.clear();
 
                     if !full_session_text.trim().is_empty() {
+                        let trimmed_session = full_session_text.trim();
                         println!(
                             "[voicy] [worker] Session finished. Broadcasting full transcript ({} chars): \"{}\"",
-                            full_session_text.len(),
-                            full_session_text
+                            trimmed_session.len(),
+                            trimmed_session
                         );
-                        broadcaster.broadcast_transcription(&full_session_text);
+                        // Broadcast full accumulated session to socket
+                        broadcaster.broadcast_transcription(trimmed_session);
+                        // Copy full accumulated session to clipboard
+                        output::copy_to_clipboard(trimmed_session);
                     }
 
                     // Press Enter on target window / tmux pane

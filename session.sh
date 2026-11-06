@@ -4,7 +4,6 @@ SESSION="voicy"
 TARGET_DIR="$(pwd)"
 
 tmux kill-session -t "$SESSION" 2>/dev/null
-
 # editor window
 tmux new-session -d -s "$SESSION" -n "editor" -c "$TARGET_DIR"
 tmux send-keys -t "$SESSION:editor" "nvim" C-m
@@ -16,9 +15,9 @@ tmux new-window -t "$SESSION" -n "shell" -c "$TARGET_DIR"
 tmux new-window -t "$SESSION" -n "lazygit" -c "$TARGET_DIR"
 tmux send-keys -t "$SESSION:lazygit" "lazygit" C-m
 
-# superfile window
-tmux new-window -t "$SESSION" -n "superfile" -c "$TARGET_DIR"
-tmux send-keys -t "$SESSION:superfile" "spf" C-m
+# agent window
+tmux new-window -t "$SESSION" -n "agent" -c "$TARGET_DIR"
+tmux send-keys -t "$SESSION:agent" " voicy target here && sleep 2 && agy --dangerously-skip-permissions" C-m
 
 tmux select-window -t "$SESSION:editor"
 tmux attach-session -t "$SESSION"
