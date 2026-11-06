@@ -67,7 +67,22 @@ pub fn copy_to_clipboard(text: &str) {
     }
 }
 
-pub fn type_text(text: &str) {
+pub fn press_enter_key(is_dictate: bool, target: Option<&str>) {
+    if !is_dictate {
+        if let Some(t) = target {
+            if t != "none" && !t.is_empty() {
+                if tmux::send_keys_to_pane(t, "", true).is_ok() {
+                    return;
+                }
+            }
+        }
+    }
+
+    // Fallback to typing enter on active window
+    type_text("", true);
+}
+
+pub fn type_text(text: &str, press_enter: bool) {
     // 1. Try wtype (Wayland wlroots compositor default: Hyprland, Sway, River)
     let mut wtype_cmd = Command::new("wtype");
     apply_display_env(&mut wtype_cmd);
@@ -75,9 +90,11 @@ pub fn type_text(text: &str) {
 
     if let Ok(status) = wtype_cmd.status() {
         if status.success() {
-            let mut ret_cmd = Command::new("wtype");
-            apply_display_env(&mut ret_cmd);
-            let _ = ret_cmd.arg("-k").arg("Return").status();
+            if press_enter {
+                let mut ret_cmd = Command::new("wtype");
+                apply_display_env(&mut ret_cmd);
+                let _ = ret_cmd.arg("-k").arg("Return").status();
+            }
             return;
         }
     }
@@ -89,9 +106,11 @@ pub fn type_text(text: &str) {
 
     if let Ok(status) = ydo_cmd.status() {
         if status.success() {
-            let mut enter_cmd = Command::new("ydotool");
-            apply_display_env(&mut enter_cmd);
-            let _ = enter_cmd.arg("key").arg("28:1").arg("28:0").status();
+            if press_enter {
+                let mut enter_cmd = Command::new("ydotool");
+                apply_display_env(&mut enter_cmd);
+                let _ = enter_cmd.arg("key").arg("28:1").arg("28:0").status();
+            }
             return;
         }
     }
@@ -102,9 +121,11 @@ pub fn type_text(text: &str) {
     xdo_cmd.args(["type", "--clearmodifiers", text]);
     if let Ok(status) = xdo_cmd.status() {
         if status.success() {
-            let mut enter_cmd = Command::new("xdotool");
-            apply_display_env(&mut enter_cmd);
-            let _ = enter_cmd.args(["key", "Return"]).status();
+            if press_enter {
+                let mut enter_cmd = Command::new("xdotool");
+                apply_display_env(&mut enter_cmd);
+                let _ = enter_cmd.args(["key", "Return"]).status();
+            }
         }
     }
 }
@@ -129,7 +150,13 @@ pub fn append_to_dataset_log(text: &str, log_file: Option<&Path>) {
 }
 
 /// Unified multi-channel delivery router
-pub fn deliver_text(text: &str, is_dictate: bool, target: Option<&str>, log_file: Option<&Path>) {
+pub fn deliver_text(
+    text: &str,
+    is_dictate: bool,
+    target: Option<&str>,
+    log_file: Option<&Path>,
+    press_enter: bool,
+) {
     if text.trim().is_empty() {
         return;
     }
@@ -141,8 +168,7 @@ pub fn deliver_text(text: &str, is_dictate: bool, target: Option<&str>, log_file
     // Channel 1: Dictation Mode (Active GUI Window typing)
     if is_dictate {
         println!("[voicy] [output] Delivering via desktop dictation (wtype/ydotool)...");
-        type_text(text);
-        crate::sound::play_delivered_sound();
+        type_text(text, press_enter);
         return;
     }
 
@@ -150,9 +176,8 @@ pub fn deliver_text(text: &str, is_dictate: bool, target: Option<&str>, log_file
     if let Some(t) = target {
         if t != "none" && !t.is_empty() {
             println!("[voicy] [output] Delivering to tmux target '{}'...", t);
-            match tmux::send_keys_to_pane(t, text, true) {
+            match tmux::send_keys_to_pane(t, text, press_enter) {
                 Ok(_) => {
-                    crate::sound::play_delivered_sound();
                     return;
                 }
                 Err(e) => {
@@ -167,6 +192,5 @@ pub fn deliver_text(text: &str, is_dictate: bool, target: Option<&str>, log_file
 
     // Target is None or Tmux failed -> Clean Fallback to Desktop Dictation
     println!("[voicy] [output] No active target set; falling back to desktop dictation...");
-    type_text(text);
-    crate::sound::play_delivered_sound();
+    type_text(text, press_enter);
 }

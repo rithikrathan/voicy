@@ -65,10 +65,16 @@ enum Commands {
     Watch,
 }
 
-struct AudioTask {
-    samples: Vec<f32>,
-    is_dictate: bool,
-    task_id: u64,
+enum WorkerTask {
+    TranscribeChunk {
+        samples: Vec<f32>,
+        is_dictate: bool,
+        task_id: u64,
+    },
+    CommitSession {
+        is_dictate: bool,
+        task_id: u64,
+    },
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -81,70 +87,107 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Start { dictate } => {
             let cmd = if dictate { "START:DICTATE" } else { "START" };
-            let res = ipc::send_command(&socket_path, cmd)?;
-            if !res.trim().is_empty()
-                && res.trim() != "recording"
-                && res.trim() != "already_recording"
-            {
-                println!("{}", res.trim());
+            match ipc::send_command(&socket_path, cmd) {
+                Ok(resp) => {
+                    let r = resp.trim();
+                    if r == "recording" {
+                        println!("Recording started.");
+                    } else if r == "already_recording" {
+                        // Idempotent
+                    } else {
+                        println!("{}", r);
+                    }
+                }
+                Err(e) => eprintln!("Error communicating with voicy daemon: {}", e),
             }
         }
-        Commands::Stop => {
-            let res = ipc::send_command(&socket_path, "STOP")?;
-            if !res.trim().is_empty() && res.trim() != "queued" && res.trim() != "idle" {
-                println!("{}", res.trim());
+        Commands::Stop => match ipc::send_command(&socket_path, "STOP") {
+            Ok(resp) => {
+                let r = resp.trim();
+                if r == "queued" {
+                    println!("Recording stopped. Transcribing...");
+                } else if r == "idle" {
+                    // Safe no-op
+                } else {
+                    println!("{}", r);
+                }
             }
-        }
+            Err(e) => eprintln!("Error communicating with voicy daemon: {}", e),
+        },
         Commands::Toggle { dictate } => {
             let cmd = if dictate { "TOGGLE:DICTATE" } else { "TOGGLE" };
-            let res = ipc::send_command(&socket_path, cmd)?;
-            if !res.trim().is_empty() {
-                println!("{}", res.trim());
+            match ipc::send_command(&socket_path, cmd) {
+                Ok(resp) => {
+                    let r = resp.trim();
+                    if r == "recording" {
+                        println!("Recording started...");
+                    } else if r == "queued" {
+                        println!("Recording stopped. Transcribing...");
+                    } else {
+                        println!("{}", r);
+                    }
+                }
+                Err(e) => eprintln!("Error communicating with voicy daemon: {}", e),
             }
         }
-        Commands::Cancel => {
-            let res = ipc::send_command(&socket_path, "CANCEL")?;
-            if !res.trim().is_empty() {
-                println!("{}", res.trim());
+        Commands::Cancel => match ipc::send_command(&socket_path, "CANCEL") {
+            Ok(resp) => {
+                let r = resp.trim();
+                if r == "canceled_recording" {
+                    println!("Recording canceled.");
+                } else if r == "canceled_transcription" {
+                    println!("In-flight transcription canceled.");
+                } else if r == "idle" {
+                    println!("Voicy is currently idle.");
+                } else {
+                    println!("{}", r);
+                }
             }
-        }
+            Err(e) => eprintln!("Error communicating with voicy daemon: {}", e),
+        },
         Commands::Target { destination } => {
-            if let Some(dest) = destination {
-                let target_val = match dest.to_lowercase().as_str() {
-                    "here" => {
-                        if let Some(pane) = tmux::get_env_tmux_pane() {
-                            pane
-                        } else if let Some(pane) = tmux::get_active_client_pane() {
-                            pane
+            let cmd = match destination {
+                Some(ref dest) => {
+                    let trimmed = dest.trim();
+                    if trimmed.eq_ignore_ascii_case("here") {
+                        if let Some(pane_id) = tmux::get_env_tmux_pane() {
+                            format!("TARGET:{}", pane_id)
+                        } else if let Some(pane_id) = tmux::get_active_client_pane() {
+                            format!("TARGET:{}", pane_id)
                         } else {
-                            eprintln!("[voicy] Error: Not running inside tmux ($TMUX_PANE not found) and no attached tmux client detected.");
+                            eprintln!("Error: Cannot resolve current tmux pane (not in tmux?)");
                             return Ok(());
                         }
+                    } else if trimmed.eq_ignore_ascii_case("clear")
+                        || trimmed.eq_ignore_ascii_case("null")
+                        || trimmed.eq_ignore_ascii_case("none")
+                    {
+                        "TARGET:none".to_string()
+                    } else {
+                        format!("TARGET:{}", trimmed)
                     }
-                    "clear" | "null" | "none" | "0" | "" => "none".to_string(),
-                    other => other.to_string(),
-                };
+                }
+                None => "TARGET".to_string(),
+            };
 
-                let res = ipc::send_command(&socket_path, &format!("TARGET:{}", target_val))?;
-                println!("{}", res.trim());
-            } else {
-                let res = ipc::send_command(&socket_path, "TARGET")?;
-                println!("{}", res.trim());
+            match ipc::send_command(&socket_path, &cmd) {
+                Ok(resp) => print!("{}", resp),
+                Err(e) => eprintln!("Error communicating with voicy daemon: {}", e),
             }
         }
-        Commands::Status => {
-            let res = ipc::send_command(&socket_path, "STATUS")?;
-            println!("{}", res.trim());
-        }
+        Commands::Status => match ipc::send_command(&socket_path, "STATUS") {
+            Ok(resp) => print!("{}", resp),
+            Err(e) => eprintln!("Error: voicy daemon is not running ({})", e),
+        },
         Commands::Watch => {
-            run_watch(&socket_path)?;
+            watch_daemon_status(&socket_path)?;
         }
     }
 
     Ok(())
 }
 
-fn run_watch(socket_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+fn watch_daemon_status(socket_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut last_state = String::new();
 
     loop {
@@ -180,7 +223,7 @@ fn run_watch(socket_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
 
 fn start_worker_thread(
     model_profile: config::ModelProfile,
-    rx: Receiver<AudioTask>,
+    rx: Receiver<WorkerTask>,
     is_transcribing: Arc<AtomicBool>,
     is_typing: Arc<AtomicBool>,
     canceled_task_id: Arc<AtomicU64>,
@@ -204,81 +247,130 @@ fn start_worker_thread(
             }
         };
 
+        let mut session_transcript: Vec<String> = Vec::new();
+
         while let Ok(task) = rx.recv() {
-            // LIFO cancellation check before preprocessing
-            if task.task_id <= canceled_task_id.load(Ordering::SeqCst) {
-                println!(
-                    "[voicy] [worker] Task #{} canceled prior to transcription, skipping.",
-                    task.task_id
-                );
-                continue;
-            }
-
-            let samples = audio_preprocessor::process_audio(&task.samples);
-            if samples.len() < 4000 {
-                continue;
-            }
-
-            let sum_sq: f32 = samples.iter().map(|&s| s * s).sum();
-            let rms = (sum_sq / samples.len() as f32).sqrt();
-            if rms < 0.003 {
-                continue;
-            }
-
-            is_transcribing.store(true, Ordering::SeqCst);
-            println!(
-                "[voicy] [worker] Transcribing task #{} ({} samples, {:.2}s)...",
-                task.task_id,
-                samples.len(),
-                samples.len() as f32 / 16000.0
-            );
-
-            let transcribe_result = whisper_engine.transcribe(&samples);
-            is_transcribing.store(false, Ordering::SeqCst);
-
-            // LIFO cancellation check after transcription before delivery
-            if task.task_id <= canceled_task_id.load(Ordering::SeqCst) {
-                println!(
-                    "[voicy] [worker] Task #{} canceled during transcription, output discarded.",
-                    task.task_id
-                );
-                continue;
-            }
-
-            match transcribe_result {
-                Ok(text) => {
-                    let trimmed = text.trim();
-                    if trimmed.is_empty()
-                        || trimmed.eq_ignore_ascii_case("you")
-                        || trimmed.eq_ignore_ascii_case("you.")
-                        || trimmed.eq_ignore_ascii_case("thank you.")
-                        || trimmed.eq_ignore_ascii_case("[blank_audio]")
-                    {
+            match task {
+                WorkerTask::TranscribeChunk {
+                    samples: raw_samples,
+                    is_dictate,
+                    task_id,
+                } => {
+                    // Cancellation check
+                    if task_id <= canceled_task_id.load(Ordering::SeqCst) {
                         println!(
-                            "[voicy] [worker] Discarded hallucination token: \"{}\"",
-                            trimmed
+                            "[voicy] [worker] Chunk #{} canceled prior to transcription, skipping.",
+                            task_id
                         );
-                    } else {
-                        println!("[voicy] [worker] Result: \"{}\"", trimmed);
+                        continue;
+                    }
 
-                        // Broadcast to Unix Domain Socket (for home agent & external listeners)
-                        broadcaster.broadcast_transcription(trimmed);
+                    let samples = audio_preprocessor::process_audio(&raw_samples);
+                    if samples.len() < 3200 {
+                        continue;
+                    }
 
-                        // Deliver via Multi-channel Router (target or desktop dictation)
-                        let target_lock = active_target.lock().ok();
-                        let target_str = target_lock.as_deref().and_then(|opt| opt.as_deref());
+                    let sum_sq: f32 = samples.iter().map(|&s| s * s).sum();
+                    let rms = (sum_sq / samples.len() as f32).sqrt();
+                    if rms < 0.003 {
+                        continue;
+                    }
 
-                        is_typing.store(true, Ordering::SeqCst);
-                        output::deliver_text(trimmed, task.is_dictate, target_str, log_file.as_deref());
-                        is_typing.store(false, Ordering::SeqCst);
+                    is_transcribing.store(true, Ordering::SeqCst);
+                    println!(
+                        "[voicy] [worker] Transcribing chunk #{} ({} samples, {:.2}s)...",
+                        task_id,
+                        samples.len(),
+                        samples.len() as f32 / 16000.0
+                    );
+
+                    let transcribe_result = whisper_engine.transcribe(&samples);
+                    is_transcribing.store(false, Ordering::SeqCst);
+
+                    if task_id <= canceled_task_id.load(Ordering::SeqCst) {
+                        println!(
+                            "[voicy] [worker] Chunk #{} canceled during transcription, output discarded.",
+                            task_id
+                        );
+                        continue;
+                    }
+
+                    match transcribe_result {
+                        Ok(text) => {
+                            let trimmed = text.trim();
+                            if trimmed.is_empty()
+                                || trimmed.eq_ignore_ascii_case("you")
+                                || trimmed.eq_ignore_ascii_case("you.")
+                                || trimmed.eq_ignore_ascii_case("thank you.")
+                                || trimmed.eq_ignore_ascii_case("[blank_audio]")
+                            {
+                                println!(
+                                    "[voicy] [worker] Discarded hallucination token: \"{}\"",
+                                    trimmed
+                                );
+                            } else {
+                                session_transcript.push(trimmed.to_string());
+                                let formatted_text = format!("{} ", trimmed);
+                                println!("[voicy] [worker] Chunk Result: \"{}\"", trimmed);
+
+                                let target_lock = active_target.lock().ok();
+                                let target_str =
+                                    target_lock.as_deref().and_then(|opt| opt.as_deref());
+
+                                is_typing.store(true, Ordering::SeqCst);
+                                output::deliver_text(
+                                    &formatted_text,
+                                    is_dictate,
+                                    target_str,
+                                    log_file.as_deref(),
+                                    false,
+                                );
+                                is_typing.store(false, Ordering::SeqCst);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[voicy] [worker] Transcription error: {}", e);
+                        }
                     }
                 }
-                Err(e) => {
-                    eprintln!("[voicy] [worker] Transcription error: {}", e);
+
+                WorkerTask::CommitSession {
+                    is_dictate,
+                    task_id,
+                } => {
+                    if task_id <= canceled_task_id.load(Ordering::SeqCst) {
+                        println!(
+                            "[voicy] [worker] Commit task #{} canceled, skipping Enter submission.",
+                            task_id
+                        );
+                        session_transcript.clear();
+                        continue;
+                    }
+
+                    let full_session_text = session_transcript.join(" ");
+                    session_transcript.clear();
+
+                    if !full_session_text.trim().is_empty() {
+                        println!(
+                            "[voicy] [worker] Session finished. Broadcasting full transcript ({} chars): \"{}\"",
+                            full_session_text.len(),
+                            full_session_text
+                        );
+                        broadcaster.broadcast_transcription(&full_session_text);
+                    }
+
+                    // Press Enter on target window / tmux pane
+                    let target_lock = active_target.lock().ok();
+                    let target_str = target_lock.as_deref().and_then(|opt| opt.as_deref());
+
+                    is_typing.store(true, Ordering::SeqCst);
+                    output::press_enter_key(is_dictate, target_str);
+                    is_typing.store(false, Ordering::SeqCst);
+
+                    // Play delivered sound cue once on session completion
+                    sound::play_delivered_sound();
                 }
             }
-
-            std::thread::sleep(Duration::from_millis(100));
         }
     })
 }
@@ -287,7 +379,7 @@ fn run_daemon(
     custom_model_dir: Option<PathBuf>,
     socket_path: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("[voicy] Starting daemon with multi-channel routing & event streaming...");
+    println!("[voicy] Starting daemon with streaming VAD & live dictation router...");
 
     // 1. Load Configuration
     let voicy_cfg = config::VoicyConfig::load();
@@ -306,7 +398,7 @@ fn run_daemon(
     }
 
     // 3. Worker Channel & State
-    let (tx, rx): (Sender<AudioTask>, Receiver<AudioTask>) = mpsc::channel();
+    let (tx, rx): (Sender<WorkerTask>, Receiver<WorkerTask>) = mpsc::channel();
     let is_transcribing = Arc::new(AtomicBool::new(false));
     let is_typing = Arc::new(AtomicBool::new(false));
     let task_counter = Arc::new(AtomicU64::new(0));
@@ -325,8 +417,13 @@ fn run_daemon(
         log_file,
     );
 
-    println!("[voicy] Initializing audio recorder...");
-    let mut recorder = audio::AudioRecorder::new()?;
+    println!("[voicy] Initializing audio recorder with Silero VAD...");
+    let mut recorder = audio::AudioRecorder::new(
+        &voicy_cfg.audio.vad_model,
+        voicy_cfg.audio.vad_min_silence_duration,
+        voicy_cfg.audio.vad_min_speech_duration,
+        voicy_cfg.audio.vad_threshold,
+    )?;
 
     let listener = ipc::connect_or_clean(&socket_path)?;
     println!(
@@ -348,30 +445,8 @@ fn run_daemon(
 
     listener.set_nonblocking(false)?;
 
-    let mut timer_cancel: Option<std::sync::mpsc::Sender<()>> = None;
     let mut active_recording_is_dictate = false;
-
-    let start_recording_timer = |cancel_slot: &mut Option<std::sync::mpsc::Sender<()>>| {
-        if let Some(prev) = cancel_slot.take() {
-            let _ = prev.send(());
-        }
-        let (tx, rx) = std::sync::mpsc::channel();
-        *cancel_slot = Some(tx);
-        std::thread::spawn(move || {
-            if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
-                rx.recv_timeout(std::time::Duration::from_secs(30))
-            {
-                println!("[voicy] 30-second recording window reached. Playing timeout alert...");
-                sound::play_timeout_sound();
-            }
-        });
-    };
-
-    let stop_recording_timer = |cancel_slot: &mut Option<std::sync::mpsc::Sender<()>>| {
-        if let Some(prev) = cancel_slot.take() {
-            let _ = prev.send(());
-        }
-    };
+    let mut vad_forwarder_thread: Option<std::thread::JoinHandle<()>> = None;
 
     for stream in listener.incoming() {
         if !running.load(Ordering::SeqCst) {
@@ -437,22 +512,38 @@ fn run_daemon(
                 } else {
                     active_recording_is_dictate = is_dictate_cmd;
                     println!(
-                        "[voicy] Start recording (PTT, dictate={})...",
+                        "[voicy] Start live dictation recording (dictate={})...",
                         active_recording_is_dictate
                     );
                     sink::pause_media();
-                    match recorder.start() {
+
+                    let (chunk_tx, chunk_rx) = mpsc::channel::<Vec<f32>>();
+                    match recorder.start_streaming(chunk_tx) {
                         Ok(_) => {
                             std::thread::spawn(|| {
                                 std::thread::sleep(Duration::from_millis(500));
                                 sound::play_start_sound();
                             });
-                            start_recording_timer(&mut timer_cancel);
+
+                            let tx_worker = tx.clone();
+                            let tc = Arc::clone(&task_counter);
+                            let dictate_mode = active_recording_is_dictate;
+
+                            vad_forwarder_thread = Some(std::thread::spawn(move || {
+                                while let Ok(chunk) = chunk_rx.recv() {
+                                    let tid = tc.fetch_add(1, Ordering::SeqCst) + 1;
+                                    let _ = tx_worker.send(WorkerTask::TranscribeChunk {
+                                        samples: chunk,
+                                        is_dictate: dictate_mode,
+                                        task_id: tid,
+                                    });
+                                }
+                            }));
+
                             let _ = stream.write_all(b"recording\n");
                         }
                         Err(e) => {
                             sink::resume_media();
-                            stop_recording_timer(&mut timer_cancel);
                             eprintln!("[voicy] Failed to start recording: {}", e);
                             let _ = stream.write_all(format!("error: {}\n", e).as_bytes());
                         }
@@ -463,14 +554,17 @@ fn run_daemon(
 
             "STOP" => {
                 if recorder.is_recording() {
-                    println!("[voicy] Stop recording (PTT). Enqueueing audio buffer...");
-                    stop_recording_timer(&mut timer_cancel);
-                    let samples = recorder.stop();
+                    println!("[voicy] Stop live dictation. Draining speech pipeline...");
+                    let _samples = recorder.stop();
                     sink::resume_media();
 
+                    if let Some(h) = vad_forwarder_thread.take() {
+                        let _ = h.join();
+                    }
+
+                    // Enqueue final commit task
                     let tid = task_counter.fetch_add(1, Ordering::SeqCst) + 1;
-                    let _ = tx.send(AudioTask {
-                        samples,
+                    let _ = tx.send(WorkerTask::CommitSession {
                         is_dictate: active_recording_is_dictate,
                         task_id: tid,
                     });
@@ -485,16 +579,16 @@ fn run_daemon(
 
             "TOGGLE" => {
                 if recorder.is_recording() {
-                    println!(
-                        "[voicy] Stop recording requested (toggle). Enqueueing audio buffer..."
-                    );
-                    stop_recording_timer(&mut timer_cancel);
-                    let samples = recorder.stop();
+                    println!("[voicy] Stop live dictation (toggle). Draining speech pipeline...");
+                    let _samples = recorder.stop();
                     sink::resume_media();
 
+                    if let Some(h) = vad_forwarder_thread.take() {
+                        let _ = h.join();
+                    }
+
                     let tid = task_counter.fetch_add(1, Ordering::SeqCst) + 1;
-                    let _ = tx.send(AudioTask {
-                        samples,
+                    let _ = tx.send(WorkerTask::CommitSession {
                         is_dictate: active_recording_is_dictate,
                         task_id: tid,
                     });
@@ -504,22 +598,38 @@ fn run_daemon(
                 } else {
                     active_recording_is_dictate = is_dictate_cmd;
                     println!(
-                        "[voicy] Start recording requested (toggle, dictate={}).",
+                        "[voicy] Start live dictation (toggle, dictate={}).",
                         active_recording_is_dictate
                     );
                     sink::pause_media();
-                    match recorder.start() {
+
+                    let (chunk_tx, chunk_rx) = mpsc::channel::<Vec<f32>>();
+                    match recorder.start_streaming(chunk_tx) {
                         Ok(_) => {
                             std::thread::spawn(|| {
                                 std::thread::sleep(Duration::from_millis(500));
                                 sound::play_start_sound();
                             });
-                            start_recording_timer(&mut timer_cancel);
+
+                            let tx_worker = tx.clone();
+                            let tc = Arc::clone(&task_counter);
+                            let dictate_mode = active_recording_is_dictate;
+
+                            vad_forwarder_thread = Some(std::thread::spawn(move || {
+                                while let Ok(chunk) = chunk_rx.recv() {
+                                    let tid = tc.fetch_add(1, Ordering::SeqCst) + 1;
+                                    let _ = tx_worker.send(WorkerTask::TranscribeChunk {
+                                        samples: chunk,
+                                        is_dictate: dictate_mode,
+                                        task_id: tid,
+                                    });
+                                }
+                            }));
+
                             let _ = stream.write_all(b"recording\n");
                         }
                         Err(e) => {
                             sink::resume_media();
-                            stop_recording_timer(&mut timer_cancel);
                             eprintln!("[voicy] Failed to start recording: {}", e);
                             let _ = stream.write_all(format!("error: {}\n", e).as_bytes());
                         }
@@ -529,18 +639,17 @@ fn run_daemon(
             }
 
             "CANCEL" => {
-                // LIFO Stack Cancellation Model
                 if recorder.is_recording() {
-                    // Top of stack: Active recording cancelled.
-                    // Background worker task (if any) is PRESERVED and stays alive.
-                    stop_recording_timer(&mut timer_cancel);
                     recorder.cancel();
                     sink::resume_media();
-                    println!("[voicy] [cancel] Top of stack: Active recording canceled and discarded. Background transcription preserved.");
+                    if let Some(h) = vad_forwarder_thread.take() {
+                        let _ = h.join();
+                    }
+                    let current_tid = task_counter.load(Ordering::SeqCst);
+                    canceled_task_id.store(current_tid, Ordering::SeqCst);
+                    println!("[voicy] [cancel] Top of stack: Active recording canceled and discarded.");
                     let _ = stream.write_all(b"canceled_recording\n");
                 } else if is_transcribing.load(Ordering::SeqCst) {
-                    // Second layer: No active recording, but worker is transcribing/queued.
-                    // Pop and cancel the most recent transcription task.
                     let current_tid = task_counter.load(Ordering::SeqCst);
                     canceled_task_id.store(current_tid, Ordering::SeqCst);
                     println!(

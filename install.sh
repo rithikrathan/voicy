@@ -56,6 +56,20 @@ else
     echo "Model ready at $FALLBACK_MODEL_DIR"
 fi
 
+# Silero VAD verification & download
+VAD_MODEL_PATH="/mnt/sda4/models/sherpa-onnx/silero_vad.onnx"
+FALLBACK_VAD_PATH="$MODELS_DIR/silero_vad.onnx"
+if [ -f "$VAD_MODEL_PATH" ]; then
+    echo "Found Silero VAD model in $VAD_MODEL_PATH"
+elif [ -f "$FALLBACK_VAD_PATH" ]; then
+    echo "Found Silero VAD model in $FALLBACK_VAD_PATH"
+else
+    echo "Silero VAD model not found locally. Downloading (~640KB)..."
+    VAD_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"
+    curl -L -o "$FALLBACK_VAD_PATH" "$VAD_URL"
+    echo "Silero VAD ready at $FALLBACK_VAD_PATH"
+fi
+
 # 4. Build release binary
 echo "Building Voicy in release mode..."
 cargo build --release

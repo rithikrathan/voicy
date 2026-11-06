@@ -25,7 +25,6 @@ fn load_sound_bytes(filename: &str) -> Option<Vec<u8>> {
 #[derive(Debug, Clone, Copy)]
 pub enum SoundCue {
     Start,
-    Timeout,
     Delivered,
 }
 
@@ -40,7 +39,6 @@ lazy_static! {
 fn play_fallback(cue: SoundCue) {
     let filename = match cue {
         SoundCue::Start => "agentPop.mp3",
-        SoundCue::Timeout => "timeout.mp3",
         SoundCue::Delivered => "delivered.mp3",
     };
     let path = get_sound_path(filename);
@@ -81,7 +79,6 @@ fn init_player() -> Option<SoundPlayer> {
             while let Ok(cue) = rx.recv() {
                 let filename = match cue {
                     SoundCue::Start => "agentPop.mp3",
-                    SoundCue::Timeout => "timeout.mp3",
                     SoundCue::Delivered => "delivered.mp3",
                 };
 
@@ -93,7 +90,6 @@ fn init_player() -> Option<SoundPlayer> {
                                 Ok(sink) => {
                                     let volume = match cue {
                                         SoundCue::Start => 0.80,
-                                        SoundCue::Timeout => 0.80,
                                         SoundCue::Delivered => 0.26,
                                     };
                                     sink.set_volume(volume);
@@ -129,11 +125,6 @@ pub fn play_cue(cue: SoundCue) {
 /// Plays the start recording sound cue
 pub fn play_start_sound() {
     play_cue(SoundCue::Start);
-}
-
-/// Plays the 30-second warning timeout beep
-pub fn play_timeout_sound() {
-    play_cue(SoundCue::Timeout);
 }
 
 /// Plays the delivery confirmation chime

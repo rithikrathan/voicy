@@ -70,6 +70,44 @@ pub struct AudioSettings {
     pub peak_target: f32,
     #[serde(default = "default_timeout_seconds")]
     pub timeout_seconds: u64,
+    #[serde(default = "default_vad_model_path")]
+    pub vad_model: PathBuf,
+    #[serde(default = "default_vad_min_silence_duration")]
+    pub vad_min_silence_duration: f32,
+    #[serde(default = "default_vad_min_speech_duration")]
+    pub vad_min_speech_duration: f32,
+    #[serde(default = "default_vad_threshold")]
+    pub vad_threshold: f32,
+}
+
+pub fn get_default_vad_model_path() -> PathBuf {
+    let host_path = PathBuf::from("/mnt/sda4/models/sherpa-onnx/silero_vad.onnx");
+    if host_path.exists() {
+        return host_path;
+    }
+    if let Ok(data_home) = std::env::var("XDG_DATA_HOME") {
+        PathBuf::from(data_home).join("voicy/models/silero_vad.onnx")
+    } else if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".local/share/voicy/models/silero_vad.onnx")
+    } else {
+        PathBuf::from("models/silero_vad.onnx")
+    }
+}
+
+fn default_vad_model_path() -> PathBuf {
+    get_default_vad_model_path()
+}
+
+fn default_vad_min_silence_duration() -> f32 {
+    0.70
+}
+
+fn default_vad_min_speech_duration() -> f32 {
+    0.40
+}
+
+fn default_vad_threshold() -> f32 {
+    0.45
 }
 
 fn default_sample_rate() -> u32 {
@@ -106,6 +144,10 @@ impl Default for AudioSettings {
             enable_peak_norm: default_bool_true(),
             peak_target: default_peak_target(),
             timeout_seconds: default_timeout_seconds(),
+            vad_model: default_vad_model_path(),
+            vad_min_silence_duration: default_vad_min_silence_duration(),
+            vad_min_speech_duration: default_vad_min_speech_duration(),
+            vad_threshold: default_vad_threshold(),
         }
     }
 }

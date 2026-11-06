@@ -81,18 +81,16 @@ pub fn is_pane_alive(target: &str) -> bool {
 
 /// Injects literal text and optionally Enter into the target tmux pane
 pub fn send_keys_to_pane(target: &str, text: &str, press_enter: bool) -> Result<(), String> {
-    if text.trim().is_empty() {
-        return Ok(());
-    }
+    if !text.is_empty() {
+        // 1. Send literal characters without tmux key name lookup (-l)
+        let status = Command::new("tmux")
+            .args(["send-keys", "-t", target, "-l", "--", text])
+            .status()
+            .map_err(|e| format!("Failed to invoke tmux send-keys: {}", e))?;
 
-    // 1. Send literal characters without tmux key name lookup (-l)
-    let status = Command::new("tmux")
-        .args(["send-keys", "-t", target, "-l", "--", text])
-        .status()
-        .map_err(|e| format!("Failed to invoke tmux send-keys: {}", e))?;
-
-    if !status.success() {
-        return Err(format!("tmux send-keys returned exit code {:?}", status.code()));
+        if !status.success() {
+            return Err(format!("tmux send-keys returned exit code {:?}", status.code()));
+        }
     }
 
     // 2. Send Enter key if requested
