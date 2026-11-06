@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
+use crate::sink::{pause_media, resume_media};
 
 struct SynthesisJob {
     id: u64,
@@ -175,10 +176,21 @@ impl TtsManager {
                 }
             };
 
+            let mut media_is_paused = false;
+
             while let Ok(job) = playback_rx.recv() {
                 if job.id <= cancel_play_clone.load(Ordering::SeqCst) {
                     println!("[voicy] [tts] Discarding queued playback for job #{}.", job.id);
+                    if media_is_paused && playback_rx.try_recv().is_err() {
+                        resume_media();
+                        media_is_paused = false;
+                    }
                     continue;
+                }
+
+                if !media_is_paused {
+                    pause_media();
+                    media_is_paused = true;
                 }
 
                 isp_clone.store(true, Ordering::SeqCst);
@@ -194,6 +206,10 @@ impl TtsManager {
                     Err(e) => {
                         eprintln!("[voicy] [tts] Could not create rodio Sink: {}", e);
                         isp_clone.store(false, Ordering::SeqCst);
+                        if media_is_paused && playback_rx.try_recv().is_err() {
+                            resume_media();
+                            media_is_paused = false;
+                        }
                         continue;
                     }
                 };
@@ -217,6 +233,18 @@ impl TtsManager {
                 }
                 isp_clone.store(false, Ordering::SeqCst);
                 println!("[voicy] [tts] Finished playback for job #{}.", job.id);
+
+                // If playback queue is drained, resume media playback
+                if playback_rx.try_recv().is_err() {
+                    if media_is_paused {
+                        resume_media();
+                        media_is_paused = false;
+                    }
+                }
+            }
+
+            if media_is_paused {
+                resume_media();
             }
         });
 
@@ -268,6 +296,7 @@ impl TtsManager {
             sink.stop();
         }
         self.is_speaking.store(false, Ordering::SeqCst);
+        resume_media();
         println!("[voicy] [tts] Cancelled and cleared all TTS jobs up to #{}.", latest_id);
     }
 
