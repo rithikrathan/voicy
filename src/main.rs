@@ -417,13 +417,8 @@ fn run_daemon(
         log_file,
     );
 
-    println!("[voicy] Initializing audio recorder with Silero VAD...");
-    let mut recorder = audio::AudioRecorder::new(
-        &voicy_cfg.audio.vad_model,
-        voicy_cfg.audio.vad_min_silence_duration,
-        voicy_cfg.audio.vad_min_speech_duration,
-        voicy_cfg.audio.vad_threshold,
-    )?;
+    println!("[voicy] Initializing audio recorder with arithmetic chunker...");
+    let mut recorder = audio::AudioRecorder::new(voicy_cfg.audio.silence_threshold)?;
 
     let listener = ipc::connect_or_clean(&socket_path)?;
     println!(

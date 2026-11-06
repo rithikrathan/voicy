@@ -1,30 +1,22 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
 use rubato::{FastFixedIn, PolynomialDegree, Resampler};
-use sherpa_rs::silero_vad::{SileroVad, SileroVadConfig};
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 pub struct AudioRecorder {
     is_recording: Arc<AtomicBool>,
     stream: Option<Stream>,
     sample_rate: u32,
-    vad_config: SileroVadConfig,
-    sender: Option<Sender<Vec<f32>>>,
-    vad_worker_handle: Option<std::thread::JoinHandle<()>>,
-    raw_buffer: Arc<Mutex<Vec<f32>>>,
+    silence_threshold: f32,
+    pcm_sender: Option<Sender<Vec<f32>>>,
+    chunker_handle: Option<std::thread::JoinHandle<()>>,
+    raw_session_buffer: Arc<Mutex<Vec<f32>>>,
 }
 
 impl AudioRecorder {
-    pub fn new(
-        vad_model_path: &Path,
-        min_silence_duration: f32,
-        min_speech_duration: f32,
-        threshold: f32,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(silence_threshold: f32) -> Result<Self, Box<dyn std::error::Error>> {
         let host = cpal::default_host();
         let device = host
             .default_input_device()
@@ -33,22 +25,14 @@ impl AudioRecorder {
         let config = device.default_input_config()?;
         let sample_rate = config.sample_rate().0;
 
-        let mut vad_config = SileroVadConfig::default();
-        vad_config.model = vad_model_path.to_string_lossy().to_string();
-        vad_config.min_silence_duration = min_silence_duration;
-        vad_config.min_speech_duration = min_speech_duration;
-        vad_config.threshold = threshold;
-        vad_config.sample_rate = 16000;
-        vad_config.window_size = 512;
-
         Ok(Self {
             is_recording: Arc::new(AtomicBool::new(false)),
             stream: None,
             sample_rate,
-            vad_config,
-            sender: None,
-            vad_worker_handle: None,
-            raw_buffer: Arc::new(Mutex::new(Vec::new())),
+            silence_threshold,
+            pcm_sender: None,
+            chunker_handle: None,
+            raw_session_buffer: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -60,7 +44,7 @@ impl AudioRecorder {
             return Ok(());
         }
 
-        if let Ok(mut buf) = self.raw_buffer.lock() {
+        if let Ok(mut buf) = self.raw_session_buffer.lock() {
             buf.clear();
         }
 
@@ -71,38 +55,17 @@ impl AudioRecorder {
         let config = device.default_input_config()?;
         let channels = config.channels() as usize;
         let source_rate = self.sample_rate;
+        let silence_thresh = self.silence_threshold;
 
         let (pcm_tx, pcm_rx) = std::sync::mpsc::channel::<Vec<f32>>();
-        self.sender = Some(pcm_tx.clone());
+        self.pcm_sender = Some(pcm_tx.clone());
 
-        let is_recording = Arc::clone(&self.is_recording);
-        is_recording.store(true, Ordering::SeqCst);
+        self.is_recording.store(true, Ordering::SeqCst);
 
-        let vad_config = SileroVadConfig {
-            model: self.vad_config.model.clone(),
-            min_silence_duration: self.vad_config.min_silence_duration,
-            min_speech_duration: self.vad_config.min_speech_duration,
-            max_speech_duration: 25.0,
-            threshold: self.vad_config.threshold,
-            sample_rate: 16000,
-            window_size: 512,
-            provider: None,
-            num_threads: Some(1),
-            debug: false,
-        };
+        let raw_session_clone = Arc::clone(&self.raw_session_buffer);
 
-        let raw_buffer_clone = Arc::clone(&self.raw_buffer);
-
-        // Background VAD Processor thread
-        let vad_handle = std::thread::spawn(move || {
-            let mut vad = match SileroVad::new(vad_config, 30.0) {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("[voicy] [vad] Failed to initialize SileroVad: {}", e);
-                    return;
-                }
-            };
-
+        // Arithmetic Deterministic Chunker thread
+        let handle = std::thread::spawn(move || {
             let mut resampler = if source_rate != 16000 {
                 FastFixedIn::<f32>::new(
                     16000 as f64 / source_rate as f64,
@@ -117,23 +80,33 @@ impl AudioRecorder {
             };
 
             let mut input_resample_buf: Vec<f32> = Vec::with_capacity(2048);
-            let mut active_phrase_samples: Vec<f32> = Vec::new();
-            let mut last_chunk_time = Instant::now();
+            let mut active_chunk: Vec<f32> = Vec::with_capacity(16000 * 25);
+            let mut trailing_silence_count: usize = 0;
+
+            // Frame size for RMS calculation: 30ms @ 16kHz = 480 samples
+            const FRAME_SIZE: usize = 480;
+            // Pad silence allowance around words: 200ms = ~6-7 frames
+            const SILENCE_PAD_FRAMES: usize = 7;
+            // Dispatch target: between 15s (240k samples) and max 24s (384k samples)
+            const MIN_CHUNK_DISPATCH_SAMPLES: usize = 16000 * 12; // 12 seconds
+            const MAX_CHUNK_SAMPLES: usize = 16000 * 24;          // 24 seconds cap
+
+            let mut frame_acc: Vec<f32> = Vec::with_capacity(FRAME_SIZE);
 
             while let Ok(raw_block) = pcm_rx.recv() {
-                // Resample to 16kHz
+                // Resample block to 16kHz
                 let samples_16k = if let Some(ref mut r) = resampler {
                     input_resample_buf.extend_from_slice(&raw_block);
-                    let mut out_samples = Vec::new();
+                    let mut out = Vec::new();
                     while input_resample_buf.len() >= 1024 {
                         let block = input_resample_buf.drain(..1024).collect::<Vec<f32>>();
-                        if let Ok(resampled) = r.process(&[block], None) {
-                            if let Some(ch0) = resampled.first() {
-                                out_samples.extend_from_slice(ch0);
+                        if let Ok(res) = r.process(&[block], None) {
+                            if let Some(ch0) = res.first() {
+                                out.extend_from_slice(ch0);
                             }
                         }
                     }
-                    out_samples
+                    out
                 } else {
                     raw_block
                 };
@@ -142,71 +115,75 @@ impl AudioRecorder {
                     continue;
                 }
 
-                if let Ok(mut buf) = raw_buffer_clone.lock() {
+                // Append to raw session recorder
+                if let Ok(mut buf) = raw_session_clone.lock() {
                     buf.extend_from_slice(&samples_16k);
                 }
 
-                active_phrase_samples.extend_from_slice(&samples_16k);
-                vad.accept_waveform(samples_16k);
+                // Process in 30ms frames for silence detection
+                for &s in &samples_16k {
+                    frame_acc.push(s);
+                    if frame_acc.len() == FRAME_SIZE {
+                        // Calculate RMS energy of this 30ms frame
+                        let sum_sq: f32 = frame_acc.iter().map(|&x| x * x).sum();
+                        let rms = (sum_sq / FRAME_SIZE as f32).sqrt();
 
-                // Check if VAD has popped out completed speech segments
-                while !vad.is_empty() {
-                    let segment = vad.front();
-                    vad.pop();
-                    let seg_samples = segment.samples;
-                    if !seg_samples.is_empty() {
-                        let _ = chunk_sender.send(seg_samples);
-                        active_phrase_samples.clear();
-                        last_chunk_time = Instant::now();
-                    }
-                }
+                        let is_speech = rms >= silence_thresh;
 
-                // Safety guard: If continuous speech exceeds 25 seconds without pause, flush to avoid 30s limit
-                if active_phrase_samples.len() > 16000 * 25
-                    || (active_phrase_samples.len() > 16000 * 3
-                        && last_chunk_time.elapsed().as_secs() >= 8)
-                {
-                    vad.flush();
-                    while !vad.is_empty() {
-                        let segment = vad.front();
-                        vad.pop();
-                        let seg_samples = segment.samples;
-                        if !seg_samples.is_empty() {
-                            let _ = chunk_sender.send(seg_samples);
+                        if is_speech {
+                            trailing_silence_count = 0;
+                            active_chunk.extend_from_slice(&frame_acc);
+                        } else {
+                            // Silence frame
+                            if !active_chunk.is_empty() {
+                                trailing_silence_count += 1;
+                                // Keep up to 200ms trailing padding to avoid clipping word decay
+                                if trailing_silence_count <= SILENCE_PAD_FRAMES {
+                                    active_chunk.extend_from_slice(&frame_acc);
+                                }
+                            }
                         }
+
+                        // Check if we should dispatch the chunk
+                        // 1. Natural pause slice: chunk has >= 12s of speech AND silence lasting >= 600ms (20 frames)
+                        let natural_pause = active_chunk.len() >= MIN_CHUNK_DISPATCH_SAMPLES
+                            && trailing_silence_count >= 20;
+
+                        // 2. Hard safety ceiling: reached 24 seconds of accumulated speech
+                        let hard_ceiling = active_chunk.len() >= MAX_CHUNK_SAMPLES;
+
+                        if natural_pause || hard_ceiling {
+                            let chunk_to_send = std::mem::replace(
+                                &mut active_chunk,
+                                Vec::with_capacity(16000 * 25),
+                            );
+                            if chunk_to_send.len() >= 16000 {
+                                // >= 1.0 second of audio
+                                let _ = chunk_sender.send(chunk_to_send);
+                            }
+                            trailing_silence_count = 0;
+                        }
+
+                        frame_acc.clear();
                     }
-                    active_phrase_samples.clear();
-                    last_chunk_time = Instant::now();
                 }
             }
 
-            // Flush remaining resampler input buffer if any
-            if let Some(ref mut r) = resampler {
-                if !input_resample_buf.is_empty() {
-                    let needed = 1024 - input_resample_buf.len();
-                    input_resample_buf.extend(std::iter::repeat(0.0).take(needed));
-                    let block = input_resample_buf.drain(..1024).collect::<Vec<f32>>();
-                    if let Ok(resampled) = r.process(&[block], None) {
-                        if let Some(ch0) = resampled.first() {
-                            vad.accept_waveform(ch0.clone());
-                        }
-                    }
-                }
+            // Flush remaining frame
+            if !frame_acc.is_empty() && !active_chunk.is_empty() {
+                active_chunk.extend_from_slice(&frame_acc);
             }
 
-            // Flush remaining speech upon stop
-            vad.flush();
-            while !vad.is_empty() {
-                let segment = vad.front();
-                vad.pop();
-                let seg_samples = segment.samples;
-                if !seg_samples.is_empty() {
-                    let _ = chunk_sender.send(seg_samples);
+            // Flush final accumulated chunk on session stop
+            if !active_chunk.is_empty() {
+                // Must have at least 0.25 seconds of speech
+                if active_chunk.len() >= 4000 {
+                    let _ = chunk_sender.send(active_chunk);
                 }
             }
         });
 
-        self.vad_worker_handle = Some(vad_handle);
+        self.chunker_handle = Some(handle);
 
         let is_recording_capture = Arc::clone(&self.is_recording);
         let err_fn = |err| eprintln!("Audio stream error: {}", err);
@@ -270,13 +247,13 @@ impl AudioRecorder {
     pub fn stop(&mut self) -> Vec<f32> {
         self.is_recording.store(false, Ordering::SeqCst);
         self.stream = None;
-        self.sender = None;
+        self.pcm_sender = None;
 
-        if let Some(handle) = self.vad_worker_handle.take() {
+        if let Some(handle) = self.chunker_handle.take() {
             let _ = handle.join();
         }
 
-        self.raw_buffer
+        self.raw_session_buffer
             .lock()
             .map(|mut b| std::mem::take(&mut *b))
             .unwrap_or_default()
@@ -285,11 +262,11 @@ impl AudioRecorder {
     pub fn cancel(&mut self) {
         self.is_recording.store(false, Ordering::SeqCst);
         self.stream = None;
-        self.sender = None;
-        if let Some(handle) = self.vad_worker_handle.take() {
+        self.pcm_sender = None;
+        if let Some(handle) = self.chunker_handle.take() {
             let _ = handle.join();
         }
-        if let Ok(mut buf) = self.raw_buffer.lock() {
+        if let Ok(mut buf) = self.raw_session_buffer.lock() {
             buf.clear();
         }
     }
