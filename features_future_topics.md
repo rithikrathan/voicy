@@ -1,40 +1,28 @@
-# Voicy: Dynamic Audio Chunking (Removing the 30-Second Limit)
+# Voicy: Future Roadmap & Features
 
-> **Status**: Backlog  
-> **Priority**: Low
+## 1. Dynamic Audio Chunking (Removing the 30-Second Limit)
 
-This document specifies the technical design for audio chunking to eliminate Whisper's 30-second window truncation.
+> **Status**: Completed (v1.2)  
+> **Priority**: Resolved
 
----
-
-## 1. Problem Statement
-
-Whisper models use positional embeddings constrained to a maximum of 30.0 seconds (480,000 samples at 16kHz). In `sherpa-onnx`, passing an audio buffer exceeding 30 seconds triggers truncation:
-
-```text
-Only waves less than 30 seconds are supported. We process only the first 30 seconds and discard the remaining data
-```
-
-Any speech spoken past the 30-second mark is permanently lost.
+Implemented in v1.2 using an arithmetic RMS silence-valley chunker in `src/audio.rs`:
+- Strips long dead silence gaps in real time.
+- Accumulates active voice into dense chunks and slices at natural speech pauses ($\ge 12\text{s}$ speech with $\ge 600\text{ms}$ pause).
+- Enforces a 24-second hard safety ceiling to stay well inside Whisper's 30.0s embedding window.
+- Automatically submits an Enter keystroke to tmux or active Wayland window when recording finishes, and consolidates the entire session into the system clipboard and `voicy-events.sock`.
 
 ---
 
-## 2. Proposed Architecture: Native Silence-Valley Splitting
+## 2. Upcoming Features & Exploration
 
-Rather than introducing an external neural VAD model, Voicy will perform native silence-valley detection directly in `src/audio_preprocessor.rs` using RMS energy profiling:
+### A. Ambient Noise Floor Auto-Calibration
+- **Status**: Backlog
+- **Description**: On daemon startup or mic activation, sample 200–500ms of ambient room audio to dynamically calibrate `silence_threshold` instead of requiring manual configuration tuning in noisy or quiet environments.
 
-### A. Short Audio Bypass ($\le 28$ seconds)
-- When recorded audio is under 28 seconds, it passes directly to Distil-Whisper in a single shot with zero overhead or latency change.
+### B. Optional Lightweight Neural VAD Alternative Evaluation
+- **Status**: Backlog
+- **Description**: Benchmark external non-Sherpa VAD alternatives (e.g. lightweight WebRTC VAD or Ten-VAD) against arithmetic RMS profiling for high-noise coffee shop environments, provided they do not introduce false phoneme truncation.
 
-### B. Dynamic Silence-Valley Slicing ($> 28$ seconds)
-- When audio exceeds 28 seconds, Voicy scans a candidate window (between 22.0s and 27.5s) for a natural speech pause (an RMS energy valley lasting $> 150\text{ms}$).
-- Slices the audio cleanly at the lowest energy point in that valley, ensuring no spoken word or phoneme is cut in half.
-- If the remaining audio buffer is still longer than 28 seconds, the slicing repeats recursively.
-
-### C. Multi-Segment Sequential Decoding
-- Each $\le 28$-second segment is passed sequentially through `WhisperEngine::transcribe()`.
-- The resulting text transcriptions are stitched together with single spacing, preserving native punctuation and capitalization across segments.
-- The unified, complete text is delivered in one single operation to the target destination (tmux pane or active window).
-
-### D. Timeout Adjustment
-- The 30-second recording safety alert timer (`timeout.mp3`) is extended to a longer threshold (e.g. 2 to 5 minutes) or made configurable in `config.toml`.
+### C. Streaming Transducer Engine (Zipformer / Next-gen ASR)
+- **Status**: Research
+- **Description**: Support an optional true online streaming transducer backend for token-by-token character typing with sub-100ms latency alongside the Whisper offline engine.

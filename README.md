@@ -5,9 +5,9 @@
 > [!NOTE]
 > **Dataset Logging Notice**: The daemon can automatically log all transcriptions to a file for dataset collection and future fine-tuning. This path is fully configurable in `~/.config/voicy/config.toml` under `log_file`. If set to `""` or omitted, transcription logging is completely disabled.
 >
-> **Audio Transcription Limit**: The model is currently limited to 30 seconds of audio transcription per recording due to Whisper's fixed positional embedding window. Audio exceeding 30 seconds is truncated, and a warning cue sounds at 30 seconds. Dynamic silence-valley chunking to remove this blockage is planned for a future release (see [features_future_topics.md](features_future_topics.md)).
+> **Uncapped Continuous Dictation**: Voicy features a zero-overhead dynamic arithmetic audio chunker. Dead silence is stripped in real time, and active speech is cleanly sliced at natural speech pauses into $\le 24$-second dense chunks, eliminating Whisper's 30-second window limit. You can dictate indefinitely.
 
-Voicy is a voice-to-text daemon for Linux Wayland desktops. It records on demand, transcribes speech locally with Whisper, and sends the text where you want it: into the focused window, into a specific tmux pane, to the clipboard, or out over a Unix socket for other programs to consume.
+Voicy is a voice-to-text daemon for Linux Wayland desktops. It records on demand, streams and transcribes speech locally with Whisper, and incrementally injects text where you want it: into the focused window, into a specific tmux pane, to the clipboard, or out over a Unix socket for other programs to consume.
 
 No cloud service, no audio written to disk, no window stealing. Built in Rust against PipeWire, `sherpa-onnx`, and standard Wayland tools.
 
@@ -15,13 +15,14 @@ No cloud service, no audio written to disk, no window stealing. Built in Rust ag
 
 ## What it does
 
+- **Real-time streaming dictation.** Speak continuously without a 30-second cap. Speech chunks are processed and typed sequentially into your prompt, with an automatic Enter key submitted upon session finish.
 - **Local transcription** with a quantized Distil-Whisper model via `sherpa-onnx`. Runs on CPU at roughly 0.3–0.4× real-time, with the vocab coverage of Whisper Large's distillation.
+- **Dynamic arithmetic silence-valley chunking.** Slices audio at natural pauses with zero neural network overhead (<0.1% CPU), retaining decay buffers to prevent clipped words.
 - **Pick your model** in `~/.config/voicy/config.toml`: `distil-small.en` by default, `small.en` also supported. Model files are discovered automatically.
 - **tmux routing.** `voicy target here` locks output to the pane you're in. Text is injected with `tmux send-keys`; focus never moves.
 - **Desktop dictation.** `voicy toggle --dictate` types into whatever Wayland window currently has focus using `wtype`.
-- **Event socket.** `voicy-events.sock` streams newline-delimited JSON to any number of listeners, so status bars, Python scripts, or home-server agents can react in real time.
+- **Event socket & Clipboard consolidation.** `voicy-events.sock` streams consolidated JSON at session completion, and the entire recorded transcript is copied to the system clipboard upon finish.
 - **LIFO cancel.** `voicy cancel` stops the active recording if there is one. Otherwise it cancels an in-flight transcription. Background work is left alone.
-- **Output guarantees.** Every result is copied to the clipboard and appended to a transcript log, regardless of which delivery channel is used.
 
 ---
 
