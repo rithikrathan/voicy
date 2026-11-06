@@ -64,7 +64,25 @@ enum Commands {
     Status,
     /// Stream live JSON status updates for ashell / waybar widgets
     Watch,
-    /// Speak text using local on-device TTS (Phonon)
+    /// Text-to-speech control and synthesis
+    Tts {
+        /// Text to speak (or omit when using --stop / --queue-free)
+        #[arg(value_name = "TEXT")]
+        text: Option<String>,
+        /// Stop ongoing TTS playback immediately
+        #[arg(long)]
+        stop: bool,
+        /// Stop playback and clear all pending queued speech jobs
+        #[arg(long = "queue-free")]
+        queue_free: bool,
+        /// Optional voice name (e.g. Alfie, Edwin, Freya, etc.)
+        #[arg(short, long)]
+        voice: Option<String>,
+        /// Playback volume (0.0 to 1.0)
+        #[arg(long)]
+        volume: Option<f32>,
+    },
+    /// Speak text using local on-device TTS (Phonon) - alias for voicy tts <text>
     Speak {
         /// Text to speak
         text: String,
@@ -195,6 +213,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         Commands::Watch => {
             watch_daemon_status(&socket_path)?;
+        }
+        Commands::Tts {
+            text,
+            stop,
+            queue_free,
+            voice,
+            volume,
+        } => {
+            if queue_free {
+                match ipc::send_command(&socket_path, "TTS_CLEAR_AND_STOP") {
+                    Ok(resp) => {
+                        let r = resp.trim();
+                        if r != "ok" {
+                            println!("{}", r);
+                        }
+                    }
+                    Err(e) => eprintln!("Error communicating with voicy daemon: {}", e),
+                }
+            } else if stop {
+                match ipc::send_command(&socket_path, "STOP_TTS") {
+                    Ok(resp) => {
+                        let r = resp.trim();
+                        if r != "ok" {
+                            println!("{}", r);
+                        }
+                    }
+                    Err(e) => eprintln!("Error communicating with voicy daemon: {}", e),
+                }
+            } else if let Some(t) = text {
+                let payload = serde_json::json!({
+                    "text": t,
+                    "voice": voice,
+                    "volume": volume,
+                });
+                let cmd = format!("SPEAK:{}", payload);
+                match ipc::send_command(&socket_path, &cmd) {
+                    Ok(resp) => {
+                        let r = resp.trim();
+                        if r != "ok" {
+                            println!("{}", r);
+                        }
+                    }
+                    Err(e) => eprintln!("Error communicating with voicy daemon: {}", e),
+                }
+            } else {
+                eprintln!("Error: Please provide text to speak, or use --stop or --queue-free");
+            }
         }
         Commands::Speak { text, voice, volume } => {
             let payload = serde_json::json!({
@@ -750,11 +815,11 @@ fn run_daemon(
                     }
 
                     if let Ok(parsed) = serde_json::from_str::<SpeakPayload>(json_str) {
-                        tts.speak_async(parsed.text, parsed.voice, parsed.volume);
+                        tts.enqueue_speech(parsed.text, parsed.voice, parsed.volume);
                         let _ = stream.write_all(b"ok\n");
                     } else {
                         // Plain text fallback
-                        tts.speak_async(json_str.to_string(), None, None);
+                        tts.enqueue_speech(json_str.to_string(), None, None);
                         let _ = stream.write_all(b"ok\n");
                     }
                 } else {
@@ -765,7 +830,17 @@ fn run_daemon(
 
             "STOP_TTS" => {
                 if let Some(ref tts) = tts_manager {
-                    tts.stop();
+                    tts.stop_current();
+                    let _ = stream.write_all(b"ok\n");
+                } else {
+                    let _ = stream.write_all(b"ok\n");
+                }
+                let _ = stream.flush();
+            }
+
+            "TTS_CLEAR_AND_STOP" => {
+                if let Some(ref tts) = tts_manager {
+                    tts.clear_and_stop();
                     let _ = stream.write_all(b"ok\n");
                 } else {
                     let _ = stream.write_all(b"ok\n");
