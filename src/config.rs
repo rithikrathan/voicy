@@ -200,6 +200,52 @@ impl Default for SoundSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TtsSettings {
+    #[serde(default = "default_tts_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_tts_model_dir")]
+    pub model_dir: PathBuf,
+    #[serde(default = "default_tts_voice")]
+    pub default_voice: String,
+}
+
+fn default_tts_enabled() -> bool {
+    true
+}
+
+pub fn get_default_tts_model_dir() -> PathBuf {
+    let host_path = PathBuf::from("/mnt/sda4/models/phonon-31m-en");
+    if host_path.exists() {
+        return host_path;
+    }
+    if let Ok(data_home) = std::env::var("XDG_DATA_HOME") {
+        PathBuf::from(data_home).join("voicy/models/phonon-31m-en")
+    } else if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".local/share/voicy/models/phonon-31m-en")
+    } else {
+        PathBuf::from("models/phonon-31m-en")
+    }
+}
+
+fn default_tts_model_dir() -> PathBuf {
+    get_default_tts_model_dir()
+}
+
+fn default_tts_voice() -> String {
+    "Alfie".to_string()
+}
+
+impl Default for TtsSettings {
+    fn default() -> Self {
+        Self {
+            enabled: default_tts_enabled(),
+            model_dir: default_tts_model_dir(),
+            default_voice: default_tts_voice(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoicyConfig {
     #[serde(default = "default_active_model")]
     pub active_model: String,
@@ -211,6 +257,8 @@ pub struct VoicyConfig {
     pub output: OutputSettings,
     #[serde(default)]
     pub sound: SoundSettings,
+    #[serde(default)]
+    pub tts: TtsSettings,
 }
 
 fn default_active_model() -> String {
@@ -249,6 +297,7 @@ impl Default for VoicyConfig {
             audio: AudioSettings::default(),
             output: OutputSettings::default(),
             sound: SoundSettings::default(),
+            tts: TtsSettings::default(),
         }
     }
 }

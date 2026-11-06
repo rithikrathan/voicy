@@ -7,6 +7,7 @@ mod output;
 mod sink;
 mod sound;
 mod tmux;
+mod tts;
 mod whisper;
 
 use clap::{Parser, Subcommand};
@@ -63,6 +64,19 @@ enum Commands {
     Status,
     /// Stream live JSON status updates for ashell / waybar widgets
     Watch,
+    /// Speak text using local on-device TTS (Phonon)
+    Speak {
+        /// Text to speak
+        text: String,
+        /// Optional voice name (e.g. Alfie, Edwin, Freya, etc.)
+        #[arg(short, long)]
+        voice: Option<String>,
+        /// Playback volume (0.0 to 1.0)
+        #[arg(long)]
+        volume: Option<f32>,
+    },
+    /// Stop ongoing TTS speech immediately
+    StopTts,
 }
 
 enum WorkerTask {
@@ -182,6 +196,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Watch => {
             watch_daemon_status(&socket_path)?;
         }
+        Commands::Speak { text, voice, volume } => {
+            let payload = serde_json::json!({
+                "text": text,
+                "voice": voice,
+                "volume": volume,
+            });
+            let cmd = format!("SPEAK:{}", payload);
+            match ipc::send_command(&socket_path, &cmd) {
+                Ok(resp) => {
+                    let r = resp.trim();
+                    if r != "ok" {
+                        println!("{}", r);
+                    }
+                }
+                Err(e) => eprintln!("Error communicating with voicy daemon: {}", e),
+            }
+        }
+        Commands::StopTts => match ipc::send_command(&socket_path, "STOP_TTS") {
+            Ok(resp) => {
+                let r = resp.trim();
+                if r != "ok" {
+                    println!("{}", r);
+                }
+            }
+            Err(e) => eprintln!("Error communicating with voicy daemon: {}", e),
+        },
     }
 
     Ok(())
@@ -423,6 +463,27 @@ fn run_daemon(
 
     println!("[voicy] Initializing audio recorder with arithmetic chunker...");
     let mut recorder = audio::AudioRecorder::new(voicy_cfg.audio.silence_threshold)?;
+
+    // 4. Initialize TTS Engine (if enabled)
+    let tts_manager: Option<Arc<tts::TtsManager>> = if voicy_cfg.tts.enabled && voicy_cfg.tts.model_dir.exists() {
+        println!("[voicy] Initializing local Phonon TTS engine from {}...", voicy_cfg.tts.model_dir.display());
+        match tts::TtsManager::new(&voicy_cfg.tts.model_dir) {
+            Ok(mgr) => {
+                mgr.set_default_voice(&voicy_cfg.tts.default_voice);
+                println!("[voicy] Phonon TTS initialized successfully with default voice '{}'!", voicy_cfg.tts.default_voice);
+                Some(Arc::new(mgr))
+            }
+            Err(e) => {
+                eprintln!("[voicy] Warning: Failed to initialize Phonon TTS: {}", e);
+                None
+            }
+        }
+    } else {
+        if !voicy_cfg.tts.model_dir.exists() {
+            println!("[voicy] Phonon TTS model not found at {}. TTS disabled.", voicy_cfg.tts.model_dir.display());
+        }
+        None
+    };
 
     let listener = ipc::connect_or_clean(&socket_path)?;
     println!(
@@ -669,10 +730,46 @@ fn run_daemon(
                     "transcribing\n"
                 } else if is_typing.load(Ordering::SeqCst) {
                     "typing\n"
+                } else if tts_manager.as_ref().map(|t| t.is_speaking()).unwrap_or(false) {
+                    "speaking\n"
                 } else {
                     "idle\n"
                 };
                 let _ = stream.write_all(state.as_bytes());
+                let _ = stream.flush();
+            }
+
+            cmd if cmd.starts_with("SPEAK:") => {
+                let json_str = cmd.strip_prefix("SPEAK:").unwrap_or("").trim();
+                if let Some(ref tts) = tts_manager {
+                    #[derive(serde::Deserialize)]
+                    struct SpeakPayload {
+                        text: String,
+                        voice: Option<String>,
+                        volume: Option<f32>,
+                    }
+
+                    if let Ok(parsed) = serde_json::from_str::<SpeakPayload>(json_str) {
+                        tts.speak_async(parsed.text, parsed.voice, parsed.volume);
+                        let _ = stream.write_all(b"ok\n");
+                    } else {
+                        // Plain text fallback
+                        tts.speak_async(json_str.to_string(), None, None);
+                        let _ = stream.write_all(b"ok\n");
+                    }
+                } else {
+                    let _ = stream.write_all(b"error: TTS engine not initialized or disabled\n");
+                }
+                let _ = stream.flush();
+            }
+
+            "STOP_TTS" => {
+                if let Some(ref tts) = tts_manager {
+                    tts.stop();
+                    let _ = stream.write_all(b"ok\n");
+                } else {
+                    let _ = stream.write_all(b"ok\n");
+                }
                 let _ = stream.flush();
             }
 
