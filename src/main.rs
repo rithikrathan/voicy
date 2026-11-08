@@ -4,6 +4,7 @@ mod broadcaster;
 mod config;
 mod ipc;
 mod output;
+mod post_processor;
 mod sink;
 mod sound;
 mod tmux;
@@ -261,7 +262,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("Error: Please provide text to speak, or use --stop or --queue-free");
             }
         }
-        Commands::Speak { text, voice, volume } => {
+        Commands::Speak {
+            text,
+            voice,
+            volume,
+        } => {
             let payload = serde_json::json!({
                 "text": text,
                 "voice": voice,
@@ -403,12 +408,7 @@ fn start_worker_thread(
                     match transcribe_result {
                         Ok(text) => {
                             let trimmed = text.trim();
-                            if trimmed.is_empty()
-                                || trimmed.eq_ignore_ascii_case("you")
-                                || trimmed.eq_ignore_ascii_case("you.")
-                                || trimmed.eq_ignore_ascii_case("thank you.")
-                                || trimmed.eq_ignore_ascii_case("[blank_audio]")
-                            {
+                            if trimmed.is_empty() {
                                 println!(
                                     "[voicy] [worker] Discarded hallucination token: \"{}\"",
                                     trimmed
@@ -494,7 +494,10 @@ fn run_daemon(
     let voicy_cfg = config::VoicyConfig::load();
     let (model_name, mut model_profile) = voicy_cfg.get_active_model_profile();
     if let Some(dir) = custom_model_dir {
-        println!("[voicy] Overriding model directory with CLI flag: {}", dir.display());
+        println!(
+            "[voicy] Overriding model directory with CLI flag: {}",
+            dir.display()
+        );
         model_profile.path = dir;
     }
     println!("[voicy] Active model selected: '{}'", model_name);
@@ -530,25 +533,35 @@ fn run_daemon(
     let mut recorder = audio::AudioRecorder::new(voicy_cfg.audio.silence_threshold)?;
 
     // 4. Initialize TTS Engine (if enabled)
-    let tts_manager: Option<Arc<tts::TtsManager>> = if voicy_cfg.tts.enabled && voicy_cfg.tts.model_dir.exists() {
-        println!("[voicy] Initializing local Phonon TTS engine from {}...", voicy_cfg.tts.model_dir.display());
-        match tts::TtsManager::new(&voicy_cfg.tts.model_dir) {
-            Ok(mgr) => {
-                mgr.set_default_voice(&voicy_cfg.tts.default_voice);
-                println!("[voicy] Phonon TTS initialized successfully with default voice '{}'!", voicy_cfg.tts.default_voice);
-                Some(Arc::new(mgr))
+    let tts_manager: Option<Arc<tts::TtsManager>> =
+        if voicy_cfg.tts.enabled && voicy_cfg.tts.model_dir.exists() {
+            println!(
+                "[voicy] Initializing local Phonon TTS engine from {}...",
+                voicy_cfg.tts.model_dir.display()
+            );
+            match tts::TtsManager::new(&voicy_cfg.tts.model_dir) {
+                Ok(mgr) => {
+                    mgr.set_default_voice(&voicy_cfg.tts.default_voice);
+                    println!(
+                        "[voicy] Phonon TTS initialized successfully with default voice '{}'!",
+                        voicy_cfg.tts.default_voice
+                    );
+                    Some(Arc::new(mgr))
+                }
+                Err(e) => {
+                    eprintln!("[voicy] Warning: Failed to initialize Phonon TTS: {}", e);
+                    None
+                }
             }
-            Err(e) => {
-                eprintln!("[voicy] Warning: Failed to initialize Phonon TTS: {}", e);
-                None
+        } else {
+            if !voicy_cfg.tts.model_dir.exists() {
+                println!(
+                    "[voicy] Phonon TTS model not found at {}. TTS disabled.",
+                    voicy_cfg.tts.model_dir.display()
+                );
             }
-        }
-    } else {
-        if !voicy_cfg.tts.model_dir.exists() {
-            println!("[voicy] Phonon TTS model not found at {}. TTS disabled.", voicy_cfg.tts.model_dir.display());
-        }
-        None
-    };
+            None
+        };
 
     let listener = ipc::connect_or_clean(&socket_path)?;
     println!(
@@ -608,12 +621,16 @@ fn run_daemon(
                 let mut lock = active_target.lock().unwrap();
                 if trimmed == "none" || trimmed.is_empty() {
                     *lock = None;
-                    println!("[voicy] Active target cleared (null). Defaulting to dictation fallback.");
-                    let _ = stream.write_all(b"Target cleared (null). Defaulting to dictation fallback.\n");
+                    println!(
+                        "[voicy] Active target cleared (null). Defaulting to dictation fallback."
+                    );
+                    let _ = stream
+                        .write_all(b"Target cleared (null). Defaulting to dictation fallback.\n");
                 } else {
                     *lock = Some(trimmed.to_string());
                     println!("[voicy] Active target set to: '{}'", trimmed);
-                    let _ = stream.write_all(format!("Active target set to: '{}'\n", trimmed).as_bytes());
+                    let _ = stream
+                        .write_all(format!("Active target set to: '{}'\n", trimmed).as_bytes());
                 }
             } else {
                 let lock = active_target.lock().unwrap();
@@ -772,7 +789,9 @@ fn run_daemon(
                     }
                     let current_tid = task_counter.load(Ordering::SeqCst);
                     canceled_task_id.store(current_tid, Ordering::SeqCst);
-                    println!("[voicy] [cancel] Top of stack: Active recording canceled and discarded.");
+                    println!(
+                        "[voicy] [cancel] Top of stack: Active recording canceled and discarded."
+                    );
                     let _ = stream.write_all(b"canceled_recording\n");
                 } else if is_transcribing.load(Ordering::SeqCst) {
                     let current_tid = task_counter.load(Ordering::SeqCst);
@@ -795,7 +814,11 @@ fn run_daemon(
                     "transcribing\n"
                 } else if is_typing.load(Ordering::SeqCst) {
                     "typing\n"
-                } else if tts_manager.as_ref().map(|t| t.is_speaking()).unwrap_or(false) {
+                } else if tts_manager
+                    .as_ref()
+                    .map(|t| t.is_speaking())
+                    .unwrap_or(false)
+                {
                     "speaking\n"
                 } else {
                     "idle\n"

@@ -174,7 +174,8 @@ pub fn deliver_text(
     if let Some(t) = target {
         if t != "none" && !t.is_empty() {
             println!("[voicy] [output] Delivering to tmux target '{}'...", t);
-            match tmux::send_keys_to_pane(t, text, press_enter) {
+            let processed_text = crate::post_processor::post_process(text);
+            match tmux::send_keys_to_pane(t, &processed_text, press_enter) {
                 Ok(_) => {
                     return;
                 }

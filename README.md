@@ -150,6 +150,14 @@ The `md2tts-stop` prefix stops any currently playing TTS before recording starts
 
 ---
 
+## Audio Attribution & Copyright Notice
+
+The UI audio cues packaged in `src/assets/ui/` (`agentPop.mp3`, `delivered.mp3`, `timeout.mp3`) are sourced from royalty-free public domain and Creative Commons community audio platforms (including Pixabay and Freesound). Due to renamed local filenames during initial development, specific creator tags for some audio clips may be missing from metadata.
+
+If you are the original creator or copyright holder of any of these sound cues, please reach out or open an issue on this repository so we can provide exact attribution credits, update licenses, or remove them immediately per your preference.
+
+---
+
 ## License
 
 MIT.
