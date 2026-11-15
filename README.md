@@ -107,8 +107,23 @@ voicy target
 ### Status
 
 ```bash
-voicy status   # one-shot state: idle, recording, transcribing, typing, speaking
-voicy watch    # live JSON updates for waybar / ashell
+voicy status          # Detailed human-readable status overview
+voicy status --short  # One-shot raw state: idle, recording, transcribing, typing, speaking
+voicy status --json   # Structured JSON status
+voicy watch           # Live JSON updates for waybar / ashell
+```
+
+### Agent Mode (/btw)
+
+Voicy includes a dedicated Agent Mode that automatically packages transcribed speech as `/btw <instruction>` with strict instructions referencing `~/.config/voicy/agent_rules.md`.
+
+```bash
+# Toggle recording in Agent mode
+voicy toggle --btw
+voicy toggle -b
+
+# Start recording in Agent mode
+voicy start --btw
 ```
 
 ---
@@ -129,14 +144,17 @@ done
 
 ## Hyprland keybindings
 
-Add to `~/.config/hypr/keybinds.conf`:
+Add to your Hyprland keybinds file (e.g. `~/.config/hypr/keybinds.conf` or `~/.config/hypr-minimal/keybinds.conf`):
 
 ```ini
 # Toggle recording (targeted, or dictation fallback)
-bind = Super, D, exec, ~/.local/bin/md2tts-stop && ~/.local/bin/voicy toggle
+bind = , Alt_R, exec, ~/.local/bin/md2tts-stop && ~/.local/bin/voicy toggle
+
+# Toggle Agent Mode (/btw instruction mode)
+bind = Super, I, exec, ~/.local/bin/md2tts-stop && ~/.local/bin/voicy toggle --btw
 
 # Desktop-only dictation
-bind = Super+Alt, D, exec, ~/.local/bin/md2tts-stop && ~/.local/bin/voicy toggle --dictate
+bind = Super, D, exec, ~/.local/bin/md2tts-stop && ~/.local/bin/voicy toggle --dictate
 
 # Cancel
 bind = Super+Shift, D, exec, ~/.local/bin/voicy cancel
@@ -144,6 +162,9 @@ bind = Super+Shift, D, exec, ~/.local/bin/voicy cancel
 # Push-to-talk
 bind = , F12, exec, ~/.local/bin/md2tts-stop && ~/.local/bin/voicy start
 bindr = , F12, exec, ~/.local/bin/voicy stop
+
+# Stop ongoing TTS immediately
+bind = Super+Shift, V, exec, ~/.local/bin/md2tts-stop && voicy stop-tts
 ```
 
 The `md2tts-stop` prefix stops any currently playing TTS before recording starts. Drop it if you don't use that tool.

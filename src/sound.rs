@@ -26,6 +26,7 @@ fn load_sound_bytes(filename: &str) -> Option<Vec<u8>> {
 pub enum SoundCue {
     Start,
     Delivered,
+    TtsStart,
 }
 
 struct SoundPlayer {
@@ -40,6 +41,7 @@ fn play_fallback(cue: SoundCue) {
     let filename = match cue {
         SoundCue::Start => "agentPop.mp3",
         SoundCue::Delivered => "delivered.mp3",
+        SoundCue::TtsStart => "tts_start.wav",
     };
     let path = get_sound_path(filename);
     if path.exists() {
@@ -80,6 +82,7 @@ fn init_player() -> Option<SoundPlayer> {
                 let filename = match cue {
                     SoundCue::Start => "agentPop.mp3",
                     SoundCue::Delivered => "delivered.mp3",
+                    SoundCue::TtsStart => "tts_start.wav",
                 };
 
                 if let Some(bytes) = load_sound_bytes(filename) {
@@ -91,6 +94,7 @@ fn init_player() -> Option<SoundPlayer> {
                                     let volume = match cue {
                                         SoundCue::Start => 0.80,
                                         SoundCue::Delivered => 0.26,
+                                        SoundCue::TtsStart => 0.60,
                                     };
                                     sink.set_volume(volume);
                                     sink.append(source);
@@ -130,6 +134,11 @@ pub fn play_start_sound() {
 /// Plays the delivery confirmation chime
 pub fn play_delivered_sound() {
     play_cue(SoundCue::Delivered);
+}
+
+/// Plays the TTS start sound cue
+pub fn play_tts_start_sound() {
+    play_cue(SoundCue::TtsStart);
 }
 
 #[cfg(test)]

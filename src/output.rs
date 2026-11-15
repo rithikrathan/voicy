@@ -3,6 +3,22 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref LAST_DELIVERED: Mutex<Option<String>> = Mutex::new(None);
+}
+
+pub fn get_last_delivered() -> Option<String> {
+    LAST_DELIVERED.lock().ok().and_then(|guard| guard.clone())
+}
+
+pub fn set_last_delivered(text: &str) {
+    if let Ok(mut guard) = LAST_DELIVERED.lock() {
+        *guard = Some(text.to_string());
+    }
+}
 
 fn get_wayland_display() -> Option<String> {
     if let Ok(disp) = std::env::var("WAYLAND_DISPLAY") {
@@ -157,6 +173,17 @@ pub fn deliver_text(
     log_file: Option<&Path>,
     press_enter: bool,
 ) {
+    deliver_text_with_mode(text, is_dictate, false, target, log_file, press_enter);
+}
+
+pub fn deliver_text_with_mode(
+    text: &str,
+    is_dictate: bool,
+    is_btw: bool,
+    target: Option<&str>,
+    log_file: Option<&Path>,
+    press_enter: bool,
+) {
     if text.trim().is_empty() {
         return;
     }
@@ -166,7 +193,12 @@ pub fn deliver_text(
     // Channel 1: Dictation Mode (Active GUI Window typing)
     if is_dictate {
         println!("[voicy] [output] Delivering via desktop dictation (wtype/ydotool)...");
-        type_text(text, press_enter);
+        let delivered_text = if is_btw {
+            format!("/btw {} (Follow instructions in ~/.config/voicy/agent_rules.md strictly)", text)
+        } else {
+            text.to_string()
+        };
+        type_text(&delivered_text, press_enter);
         return;
     }
 
@@ -174,8 +206,36 @@ pub fn deliver_text(
     if let Some(t) = target {
         if t != "none" && !t.is_empty() {
             println!("[voicy] [output] Delivering to tmux target '{}'...", t);
-            let processed_text = crate::post_processor::post_process(text);
-            match tmux::send_keys_to_pane(t, &processed_text, press_enter) {
+            let raw_processed = crate::post_processor::post_process(text);
+            let processed_text = if is_btw {
+                let trimmed = text.trim();
+                let inner = if trimmed.to_ascii_lowercase().starts_with("by the way") {
+                    trimmed["by the way".len()..].trim_start_matches([',', ':', ' ']).trim()
+                } else if trimmed.to_ascii_lowercase().starts_with("btw") {
+                    trimmed["btw".len()..].trim_start_matches([',', ':', ' ']).trim()
+                } else {
+                    trimmed
+                };
+                format!("/btw {} (Follow instructions in ~/.config/voicy/agent_rules.md strictly)", inner)
+            } else {
+                raw_processed
+            };
+            
+            // Check for resend command
+            let text_to_send = if processed_text.trim() == "__VOICY_RESEND__" {
+                if let Some(prev) = get_last_delivered() {
+                    println!("[voicy] [output] Resending last delivered message...");
+                    prev
+                } else {
+                    println!("[voicy] [output] Resend requested but no previous message recorded.");
+                    return;
+                }
+            } else {
+                set_last_delivered(&processed_text);
+                processed_text
+            };
+
+            match tmux::send_keys_to_pane(t, &text_to_send, press_enter) {
                 Ok(_) => {
                     return;
                 }
@@ -191,5 +251,10 @@ pub fn deliver_text(
 
     // Target is None or Tmux failed -> Clean Fallback to Desktop Dictation
     println!("[voicy] [output] No active target set; falling back to desktop dictation...");
-    type_text(text, press_enter);
+    let delivered_text = if is_btw {
+        format!("/btw {} (Follow instructions in ~/.config/voicy/agent_rules.md strictly)", text)
+    } else {
+        text.to_string()
+    };
+    type_text(&delivered_text, press_enter);
 }

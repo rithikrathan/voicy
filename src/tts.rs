@@ -191,6 +191,7 @@ impl TtsManager {
                 if !media_is_paused {
                     pause_media();
                     media_is_paused = true;
+                    crate::sound::play_tts_start_sound();
                 }
 
                 isp_clone.store(true, Ordering::SeqCst);

@@ -10,6 +10,7 @@ mod sound;
 mod tmux;
 mod tts;
 mod whisper;
+mod ws_server;
 
 use clap::{Parser, Subcommand};
 use std::io::{BufRead, BufReader, Write};
@@ -45,6 +46,9 @@ enum Commands {
         /// Pure desktop dictation mode (types into active Wayland window)
         #[arg(long)]
         dictate: bool,
+        /// Prepend /btw with agent instruction context
+        #[arg(short, long)]
+        btw: bool,
     },
     /// Push-to-talk: stop recording, transcribe, and deliver text
     Stop,
@@ -53,6 +57,9 @@ enum Commands {
         /// Pure desktop dictation mode (types into active Wayland window)
         #[arg(long)]
         dictate: bool,
+        /// Prepend /btw with agent instruction context
+        #[arg(short, long)]
+        btw: bool,
     },
     /// Cancel the topmost active task (LIFO: active recording first, or in-flight transcription)
     Cancel,
@@ -62,7 +69,14 @@ enum Commands {
         destination: Option<String>,
     },
     /// Query daemon status
-    Status,
+    Status {
+        /// Print one-line raw status (idle, recording, transcribing, typing, speaking)
+        #[arg(short, long)]
+        short: bool,
+        /// Output status formatted as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Stream live JSON status updates for ashell / waybar widgets
     Watch,
     /// Text-to-speech control and synthesis
@@ -96,16 +110,25 @@ enum Commands {
     },
     /// Stop ongoing TTS speech immediately
     StopTts,
+    /// List all available on-device TTS voices with descriptions
+    ListVoices,
+    /// Manage mobile voicyClient connection and mode (on, off, toggle, status)
+    Client {
+        /// Optional sub-action: 'on', 'off', 'toggle', or 'status'
+        action: Option<String>,
+    },
 }
 
 enum WorkerTask {
     TranscribeChunk {
         samples: Vec<f32>,
         is_dictate: bool,
+        is_btw: bool,
         task_id: u64,
     },
     CommitSession {
         is_dictate: bool,
+        is_btw: bool,
         task_id: u64,
     },
 }
@@ -118,8 +141,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Daemon { model_dir } => {
             run_daemon(model_dir, socket_path)?;
         }
-        Commands::Start { dictate } => {
-            let cmd = if dictate { "START:DICTATE" } else { "START" };
+        Commands::Start { dictate, btw } => {
+            let cmd = if btw {
+                "START:BTW"
+            } else if dictate {
+                "START:DICTATE"
+            } else {
+                "START"
+            };
             match ipc::send_command(&socket_path, cmd) {
                 Ok(resp) => {
                     let r = resp.trim();
@@ -147,8 +176,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Err(e) => eprintln!("Error communicating with voicy daemon: {}", e),
         },
-        Commands::Toggle { dictate } => {
-            let cmd = if dictate { "TOGGLE:DICTATE" } else { "TOGGLE" };
+        Commands::Toggle { dictate, btw } => {
+            let cmd = if btw {
+                "TOGGLE:BTW"
+            } else if dictate {
+                "TOGGLE:DICTATE"
+            } else {
+                "TOGGLE"
+            };
             match ipc::send_command(&socket_path, cmd) {
                 Ok(resp) => {
                     let r = resp.trim();
@@ -208,10 +243,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => eprintln!("Error communicating with voicy daemon: {}", e),
             }
         }
-        Commands::Status => match ipc::send_command(&socket_path, "STATUS") {
-            Ok(resp) => print!("{}", resp),
-            Err(e) => eprintln!("Error: voicy daemon is not running ({})", e),
-        },
+        Commands::Status { short, json } => {
+            let cmd = if short { "STATUS" } else { "STATUS_FULL" };
+            match ipc::send_command(&socket_path, cmd) {
+                Ok(resp) => {
+                    let r = resp.trim();
+                    if short {
+                        println!("{}", r);
+                    } else if json {
+                        println!("{}", r);
+                    } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(r) {
+                        let state = val["state"].as_str().unwrap_or("unknown");
+                        let target = val["target"].as_str().unwrap_or("none (dictation fallback)");
+                        let is_btw = val["is_btw"].as_bool().unwrap_or(false);
+                        let is_dictate = val["is_dictate"].as_bool().unwrap_or(false);
+                        let whisper_model = val["whisper_model"].as_str().unwrap_or("default");
+                        let tts_enabled = val["tts_enabled"].as_bool().unwrap_or(false);
+                        let tts_speaking = val["tts_speaking"].as_bool().unwrap_or(false);
+                        let default_voice = val["default_voice"].as_str().unwrap_or("Alba");
+
+                        let mode_str = if is_btw {
+                            "Agent Mode (/btw enabled)"
+                        } else if is_dictate {
+                            "Desktop Dictation"
+                        } else {
+                            "Standard Targeted"
+                        };
+
+                        println!("Voicy Status:");
+                        println!("  State:         {}", state);
+                        println!("  Target:        {}", target);
+                        println!("  Active Mode:   {}", mode_str);
+                        println!("  Whisper Model: {}", whisper_model);
+                        println!(
+                            "  TTS Engine:    {} (speaking: {}, default voice: {})",
+                            if tts_enabled { "active" } else { "disabled" },
+                            tts_speaking,
+                            default_voice
+                        );
+                    } else {
+                        println!("{}", r);
+                    }
+                }
+                Err(e) => eprintln!("Error: voicy daemon is not running ({})", e),
+            }
+        }
         Commands::Watch => {
             watch_daemon_status(&socket_path)?;
         }
@@ -292,6 +368,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Err(e) => eprintln!("Error communicating with voicy daemon: {}", e),
         },
+        Commands::ListVoices => match ipc::send_command(&socket_path, "LIST_VOICES") {
+            Ok(resp) => {
+                println!("{}", resp.trim());
+            }
+            Err(e) => eprintln!("Error communicating with voicy daemon: {}", e),
+        },
+        Commands::Client { action } => {
+            let sub = action.as_deref().unwrap_or("toggle").to_lowercase();
+            let cmd = match sub.as_str() {
+                "on" => "CLIENT:ON",
+                "off" => "CLIENT:OFF",
+                "status" => "CLIENT:STATUS",
+                "toggle" => "CLIENT:TOGGLE",
+                other => {
+                    eprintln!("Unknown client action: '{}'. Usage: voicy client [on|off|toggle|status]", other);
+                    return Ok(());
+                }
+            };
+
+            match ipc::send_command(&socket_path, cmd) {
+                Ok(resp) => {
+                    let r = resp.trim();
+                    if sub == "status" {
+                        println!("{}", r);
+                    } else {
+                        println!("Client mode: {}", r);
+                    }
+                }
+                Err(e) => eprintln!("Error communicating with voicy daemon: {}", e),
+            }
+        }
     }
 
     Ok(())
@@ -311,16 +418,27 @@ fn watch_daemon_status(socket_path: &std::path::Path) -> Result<(), Box<dyn std:
                 "recording" => {
                     println!("{{\"text\": \" Listening...\", \"alt\": \"recording\", \"class\": \"recording\"}}");
                 }
+                "client_listening" => {
+                    println!("{{\"text\": \" Client: Listening...\", \"alt\": \"client_listening\", \"class\": \"recording\"}}");
+                }
                 "transcribing" => {
                     println!("{{\"text\": \" Transcribing...\", \"alt\": \"transcribing\", \"class\": \"transcribing\"}}");
+                }
+                "client_transmitting" => {
+                    println!("{{\"text\": \" Client: Transmitting...\", \"alt\": \"client_transmitting\", \"class\": \"transcribing\"}}");
                 }
                 "typing" => {
                     println!(
                         "{{\"text\": \" Typing...\", \"alt\": \"typing\", \"class\": \"typing\"}}"
                     );
                 }
+                "speaking" => {
+                    println!(
+                        "{{\"text\": \" Speaking...\", \"alt\": \"speaking\", \"class\": \"speaking\"}}"
+                    );
+                }
                 _ => {
-                    println!("{{\"text\": \"\", \"alt\": \"idle\", \"class\": \"idle\"}}");
+                    println!("{{\"text\": \" Voicy\", \"alt\": \"idle\", \"class\": \"idle\"}}");
                 }
             }
             let _ = std::io::stdout().flush();
@@ -364,6 +482,7 @@ fn start_worker_thread(
                 WorkerTask::TranscribeChunk {
                     samples: raw_samples,
                     is_dictate,
+                    is_btw,
                     task_id,
                 } => {
                     // Cancellation check
@@ -418,19 +537,21 @@ fn start_worker_thread(
                                 let formatted_text = format!("{} ", trimmed);
                                 println!("[voicy] [worker] Chunk Result: \"{}\"", trimmed);
 
-                                let target_lock = active_target.lock().ok();
-                                let target_str =
-                                    target_lock.as_deref().and_then(|opt| opt.as_deref());
+                                if !is_btw {
+                                    let target_lock = active_target.lock().ok();
+                                    let target_str =
+                                        target_lock.as_deref().and_then(|opt| opt.as_deref());
 
-                                is_typing.store(true, Ordering::SeqCst);
-                                output::deliver_text(
-                                    &formatted_text,
-                                    is_dictate,
-                                    target_str,
-                                    log_file.as_deref(),
-                                    false,
-                                );
-                                is_typing.store(false, Ordering::SeqCst);
+                                    is_typing.store(true, Ordering::SeqCst);
+                                    output::deliver_text(
+                                        &formatted_text,
+                                        is_dictate,
+                                        target_str,
+                                        log_file.as_deref(),
+                                        false,
+                                    );
+                                    is_typing.store(false, Ordering::SeqCst);
+                                }
                             }
                         }
                         Err(e) => {
@@ -441,6 +562,7 @@ fn start_worker_thread(
 
                 WorkerTask::CommitSession {
                     is_dictate,
+                    is_btw,
                     task_id,
                 } => {
                     if task_id <= canceled_task_id.load(Ordering::SeqCst) {
@@ -466,6 +588,22 @@ fn start_worker_thread(
                         broadcaster.broadcast_transcription(trimmed_session);
                         // Copy full accumulated session to clipboard
                         output::copy_to_clipboard(trimmed_session);
+
+                        // If in BTW mode, deliver the formatted /btw message before pressing enter
+                        if is_btw {
+                            let target_lock = active_target.lock().ok();
+                            let target_str = target_lock.as_deref().and_then(|opt| opt.as_deref());
+                            is_typing.store(true, Ordering::SeqCst);
+                            output::deliver_text_with_mode(
+                                trimmed_session,
+                                is_dictate,
+                                true,
+                                target_str,
+                                log_file.as_deref(),
+                                false,
+                            );
+                            is_typing.store(false, Ordering::SeqCst);
+                        }
                     }
 
                     // Press Enter on target window / tmux pane
@@ -516,6 +654,22 @@ fn run_daemon(
     let task_counter = Arc::new(AtomicU64::new(0));
     let canceled_task_id = Arc::new(AtomicU64::new(0));
     let active_target = Arc::new(Mutex::new(None::<String>));
+
+    let shared_state = Arc::new(ws_server::SharedDaemonState {
+        client_mode_enabled: AtomicBool::new(true),
+        client_connected: AtomicBool::new(false),
+        route_tts_to_phone: AtomicBool::new(false),
+        client_active_state: Mutex::new("idle".to_string()),
+        input_lock: Mutex::new(()),
+        active_target: Arc::clone(&active_target),
+        is_typing: Arc::clone(&is_typing),
+        log_file: voicy_cfg.output.log_file.clone(),
+    });
+
+    let ws_server_instance = ws_server::WsServer::new(Arc::clone(&shared_state));
+    if let Err(e) = ws_server_instance.start(9099) {
+        eprintln!("[voicy] Warning: Failed to start WebSocket server on port 9099: {}", e);
+    }
 
     let log_file = voicy_cfg.output.log_file.clone();
     let _worker_handle = start_worker_thread(
@@ -584,6 +738,7 @@ fn run_daemon(
     listener.set_nonblocking(false)?;
 
     let mut active_recording_is_dictate = false;
+    let mut active_recording_is_btw = false;
     let mut vad_forwarder_thread: Option<std::thread::JoinHandle<()>> = None;
 
     for stream in listener.incoming() {
@@ -606,8 +761,11 @@ fn run_daemon(
         }
 
         let command = line.trim();
+        let is_btw_cmd = command.ends_with(":BTW");
         let is_dictate_cmd = command.ends_with(":DICTATE");
-        let base_cmd = if is_dictate_cmd {
+        let base_cmd = if is_btw_cmd {
+            command.strip_suffix(":BTW").unwrap_or(command)
+        } else if is_dictate_cmd {
             command.strip_suffix(":DICTATE").unwrap_or(command)
         } else {
             command
@@ -624,11 +782,19 @@ fn run_daemon(
                     println!(
                         "[voicy] Active target cleared (null). Defaulting to dictation fallback."
                     );
+                    ws_server_instance.broadcast(&ws_server::DaemonOutMessage::StatusUpdate {
+                        target: None,
+                        is_btw: false,
+                    });
                     let _ = stream
                         .write_all(b"Target cleared (null). Defaulting to dictation fallback.\n");
                 } else {
                     *lock = Some(trimmed.to_string());
                     println!("[voicy] Active target set to: '{}'", trimmed);
+                    ws_server_instance.broadcast(&ws_server::DaemonOutMessage::StatusUpdate {
+                        target: Some(trimmed.to_string()),
+                        is_btw: false,
+                    });
                     let _ = stream
                         .write_all(format!("Active target set to: '{}'\n", trimmed).as_bytes());
                 }
@@ -653,9 +819,10 @@ fn run_daemon(
                     let _ = stream.write_all(b"already_recording\n");
                 } else {
                     active_recording_is_dictate = is_dictate_cmd;
+                    active_recording_is_btw = is_btw_cmd;
                     println!(
-                        "[voicy] Start live dictation recording (dictate={})...",
-                        active_recording_is_dictate
+                        "[voicy] Start live dictation recording (dictate={}, btw={})...",
+                        active_recording_is_dictate, active_recording_is_btw
                     );
                     sink::pause_media();
 
@@ -670,6 +837,7 @@ fn run_daemon(
                             let tx_worker = tx.clone();
                             let tc = Arc::clone(&task_counter);
                             let dictate_mode = active_recording_is_dictate;
+                            let btw_mode = active_recording_is_btw;
 
                             vad_forwarder_thread = Some(std::thread::spawn(move || {
                                 while let Ok(chunk) = chunk_rx.recv() {
@@ -677,6 +845,7 @@ fn run_daemon(
                                     let _ = tx_worker.send(WorkerTask::TranscribeChunk {
                                         samples: chunk,
                                         is_dictate: dictate_mode,
+                                        is_btw: btw_mode,
                                         task_id: tid,
                                     });
                                 }
@@ -708,6 +877,7 @@ fn run_daemon(
                     let tid = task_counter.fetch_add(1, Ordering::SeqCst) + 1;
                     let _ = tx.send(WorkerTask::CommitSession {
                         is_dictate: active_recording_is_dictate,
+                        is_btw: active_recording_is_btw,
                         task_id: tid,
                     });
 
@@ -732,6 +902,7 @@ fn run_daemon(
                     let tid = task_counter.fetch_add(1, Ordering::SeqCst) + 1;
                     let _ = tx.send(WorkerTask::CommitSession {
                         is_dictate: active_recording_is_dictate,
+                        is_btw: active_recording_is_btw,
                         task_id: tid,
                     });
 
@@ -739,9 +910,10 @@ fn run_daemon(
                     let _ = stream.flush();
                 } else {
                     active_recording_is_dictate = is_dictate_cmd;
+                    active_recording_is_btw = is_btw_cmd;
                     println!(
-                        "[voicy] Start live dictation (toggle, dictate={}).",
-                        active_recording_is_dictate
+                        "[voicy] Start live dictation (toggle, dictate={}, btw={}).",
+                        active_recording_is_dictate, active_recording_is_btw
                     );
                     sink::pause_media();
 
@@ -756,6 +928,7 @@ fn run_daemon(
                             let tx_worker = tx.clone();
                             let tc = Arc::clone(&task_counter);
                             let dictate_mode = active_recording_is_dictate;
+                            let btw_mode = active_recording_is_btw;
 
                             vad_forwarder_thread = Some(std::thread::spawn(move || {
                                 while let Ok(chunk) = chunk_rx.recv() {
@@ -763,6 +936,7 @@ fn run_daemon(
                                     let _ = tx_worker.send(WorkerTask::TranscribeChunk {
                                         samples: chunk,
                                         is_dictate: dictate_mode,
+                                        is_btw: btw_mode,
                                         task_id: tid,
                                     });
                                 }
@@ -808,45 +982,137 @@ fn run_daemon(
             }
 
             "STATUS" => {
+                let client_state = if shared_state.client_mode_enabled.load(Ordering::SeqCst)
+                    && shared_state.client_connected.load(Ordering::SeqCst)
+                {
+                    shared_state.client_active_state.lock().ok().map(|s| s.clone()).unwrap_or_else(|| "idle".to_string())
+                } else {
+                    "idle".to_string()
+                };
+
                 let state = if recorder.is_recording() {
-                    "recording\n"
+                    "recording"
+                } else if client_state == "listening" {
+                    "client_listening"
                 } else if is_transcribing.load(Ordering::SeqCst) {
-                    "transcribing\n"
+                    "transcribing"
+                } else if client_state == "transmitting" {
+                    "client_transmitting"
                 } else if is_typing.load(Ordering::SeqCst) {
-                    "typing\n"
+                    "typing"
                 } else if tts_manager
                     .as_ref()
                     .map(|t| t.is_speaking())
                     .unwrap_or(false)
                 {
-                    "speaking\n"
+                    "speaking"
                 } else {
-                    "idle\n"
+                    "idle"
                 };
-                let _ = stream.write_all(state.as_bytes());
+                let _ = stream.write_all(format!("{}\n", state).as_bytes());
+                let _ = stream.flush();
+            }
+
+            "CLIENT:STATUS" => {
+                let is_on = shared_state.client_mode_enabled.load(Ordering::SeqCst);
+                let _ = stream.write_all(format!("{}\n", is_on).as_bytes());
+                let _ = stream.flush();
+            }
+
+            "CLIENT:ON" => {
+                shared_state.client_mode_enabled.store(true, Ordering::SeqCst);
+                ws_server_instance.broadcast(&ws_server::DaemonOutMessage::ClientStatus { enabled: true });
+                let _ = stream.write_all(b"on\n");
+                let _ = stream.flush();
+            }
+
+            "CLIENT:OFF" => {
+                shared_state.client_mode_enabled.store(false, Ordering::SeqCst);
+                ws_server_instance.broadcast(&ws_server::DaemonOutMessage::ClientStatus { enabled: false });
+                let _ = stream.write_all(b"off\n");
+                let _ = stream.flush();
+            }
+
+            "CLIENT:TOGGLE" => {
+                let current = shared_state.client_mode_enabled.load(Ordering::SeqCst);
+                let new_val = !current;
+                shared_state.client_mode_enabled.store(new_val, Ordering::SeqCst);
+                ws_server_instance.broadcast(&ws_server::DaemonOutMessage::ClientStatus { enabled: new_val });
+                let resp = if new_val { "on\n" } else { "off\n" };
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            }
+
+            "STATUS_FULL" => {
+                let state = if recorder.is_recording() {
+                    "recording"
+                } else if is_transcribing.load(Ordering::SeqCst) {
+                    "transcribing"
+                } else if is_typing.load(Ordering::SeqCst) {
+                    "typing"
+                } else if tts_manager
+                    .as_ref()
+                    .map(|t| t.is_speaking())
+                    .unwrap_or(false)
+                {
+                    "speaking"
+                } else {
+                    "idle"
+                };
+
+                let target_lock = active_target.lock().ok();
+                let target_val = target_lock.as_deref().and_then(|t| t.clone());
+                let is_speaking = tts_manager
+                    .as_ref()
+                    .map(|t| t.is_speaking())
+                    .unwrap_or(false);
+
+                let status_obj = serde_json::json!({
+                    "state": state,
+                    "target": target_val,
+                    "is_dictate": active_recording_is_dictate,
+                    "is_btw": active_recording_is_btw,
+                    "whisper_model": model_name,
+                    "tts_enabled": tts_manager.is_some(),
+                    "tts_speaking": is_speaking,
+                    "default_voice": voicy_cfg.tts.default_voice,
+                });
+
+                let _ = stream.write_all(format!("{}\n", status_obj).as_bytes());
                 let _ = stream.flush();
             }
 
             cmd if cmd.starts_with("SPEAK:") => {
                 let json_str = cmd.strip_prefix("SPEAK:").unwrap_or("").trim();
-                if let Some(ref tts) = tts_manager {
-                    #[derive(serde::Deserialize)]
-                    struct SpeakPayload {
-                        text: String,
-                        voice: Option<String>,
-                        volume: Option<f32>,
-                    }
+                #[derive(serde::Deserialize)]
+                struct SpeakPayload {
+                    text: String,
+                    voice: Option<String>,
+                    volume: Option<f32>,
+                }
 
-                    if let Ok(parsed) = serde_json::from_str::<SpeakPayload>(json_str) {
-                        tts.enqueue_speech(parsed.text, parsed.voice, parsed.volume);
+                let (text_to_speak, voice_opt, volume_opt) = if let Ok(parsed) = serde_json::from_str::<SpeakPayload>(json_str) {
+                    (parsed.text, parsed.voice, parsed.volume)
+                } else {
+                    (json_str.to_string(), None, None)
+                };
+
+                let should_route_to_phone = shared_state.route_tts_to_phone.load(Ordering::SeqCst)
+                    && shared_state.client_connected.load(Ordering::SeqCst);
+
+                if should_route_to_phone {
+                    // Send directly to connected mobile client; skip enqueuing desktop TTS model
+                    ws_server_instance.broadcast(&ws_server::DaemonOutMessage::TtsPrompt {
+                        text: text_to_speak,
+                    });
+                    let _ = stream.write_all(b"ok\n");
+                } else {
+                    if let Some(ref tts) = tts_manager {
+                        tts.enqueue_speech(text_to_speak, voice_opt, volume_opt);
                         let _ = stream.write_all(b"ok\n");
                     } else {
-                        // Plain text fallback
-                        tts.enqueue_speech(json_str.to_string(), None, None);
                         let _ = stream.write_all(b"ok\n");
                     }
-                } else {
-                    let _ = stream.write_all(b"error: TTS engine not initialized or disabled\n");
                 }
                 let _ = stream.flush();
             }
@@ -871,6 +1137,12 @@ fn run_daemon(
                 let _ = stream.flush();
             }
 
+            "LIST_VOICES" => {
+                let catalog_text = get_voice_catalog_formatted();
+                let _ = stream.write_all(catalog_text.as_bytes());
+                let _ = stream.flush();
+            }
+
             other => {
                 eprintln!("[voicy] Unknown command received: {}", other);
                 let _ = stream.write_all(b"unknown command\n");
@@ -883,4 +1155,117 @@ fn run_daemon(
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_file(&broadcaster_socket);
     Ok(())
+}
+
+fn get_voice_catalog_formatted() -> String {
+    let mut out = String::from("Available On-Device Voices:\n");
+    let voices = [
+        ("Alba", "Warm, articulate female voice (Default Voice)"),
+        ("Aldo", "Crisp, clean male voice"),
+        ("Alfie", "Friendly British human male voice"),
+        ("Alicia", "Clear, pleasant Spanish female voice"),
+        ("Annika", "Bright, natural Scandinavian-English female voice"),
+        ("Anton", "Deep, warm German-English male voice"),
+        ("Arnaud", "Refined French-English male voice"),
+        ("Augustin", "Classic, cultured French male voice"),
+        ("Azgorath", "Deep raspy fantasy demon/sorcerer male character voice"),
+        ("Azucena", "Gentle, melodious Spanish female voice"),
+        ("Baptiste", "Smooth, contemporary French male voice"),
+        ("Borja", "Resonant Spanish male voice"),
+        ("Bryony", "Graceful, clear British female voice"),
+        ("Candela", "Energetic, bright Spanish female voice"),
+        ("Captain_Silas_Blackwater", "Grizzled pirate captain male character voice"),
+        ("Celia", "Soft, expressive female voice"),
+        ("Clarice", "Poised, sophisticated female voice"),
+        ("Coralie", "Warm, charming French-English female voice"),
+        ("Danae", "Gentle, lyrical female voice"),
+        ("Davi", "Casual, friendly Portuguese male voice"),
+        ("Débora", "Polished, expressive Portuguese female voice"),
+        ("Delia", "Calm, steady mature female voice"),
+        ("Easton", "Confident, modern American male voice"),
+        ("Edwin", "Deep, classic British human male voice"),
+        ("Elodie-Rose", "Playful, bright British female voice"),
+        ("Everly", "Sweet, youthful American female voice"),
+        ("Fairy_Godmother", "Whimsical, enchanting elder female character voice"),
+        ("Fennick_the_Young_Elf", "Youthful, agile fantasy elf male character voice"),
+        ("Flávia", "Melodic Brazilian Portuguese female voice"),
+        ("Freya", "Sophisticated British human female voice"),
+        ("Grub_the_Ogre", "Gruff, booming fantasy ogre male character voice"),
+        ("Guillermo", "Rich, commanding Spanish male voice"),
+        ("Hadley", "Casual, upbeat American female voice"),
+        ("Harper", "Clear, neutral modern American female voice"),
+        ("Hélène", "Elegant, melodic French female voice"),
+        ("Henrik", "Steady, grounded Nordic male voice"),
+        ("Hugh", "Distinguished British human male voice"),
+        ("Igor", "Grounded, deep Eastern European male voice"),
+        ("Iker", "Warm, approachable Spanish male voice"),
+        ("Imogen", "Bright, articulate British female voice"),
+        ("Isadora", "Poetic, warm Portuguese female voice"),
+        ("Izan", "Youthful, energetic Spanish male voice"),
+        ("Jette", "Gentle, cheerful German-English female voice"),
+        ("Jimena", "Warm, lively Spanish female voice"),
+        ("Josefine", "Clear, soothing female voice"),
+        ("Jule", "Brisk, bright German female voice"),
+        ("Jules", "Articulate, stylish French male voice"),
+        ("Juniper", "Airy, gentle American female voice"),
+        ("Kauã", "Energetic Brazilian Portuguese male voice"),
+        ("Lalo", "Expressive, animated Latin male voice"),
+        ("Leon", "Calm, reassuring male voice"),
+        ("Leonel", "Smooth, suave Spanish male voice"),
+        ("Lilou", "Cute, playful French female voice"),
+        ("Lotta", "Light, cheerful Scandinavian female voice"),
+        ("Lottie", "Charming, friendly British female voice"),
+        ("Lucía-Sol", "Radiant, expressive Spanish female voice"),
+        ("Lucien", "Distinguished, smooth French male voice"),
+        ("Maëlys", "Soft, delicate French female voice"),
+        ("Maeve", "Rich, elegant British female voice"),
+        ("Manuela-Lu", "Warm, vivacious Portuguese female voice"),
+        ("Marcelo", "Steady, professional Portuguese male voice"),
+        ("Marcos", "Strong, articulate Spanish male voice"),
+        ("Marius", "Thoughtful, deep European male voice"),
+        ("Master_Aldric", "Wise elderly wizard/mentor character voice"),
+        ("Mats", "Crisp, friendly Scandinavian male voice"),
+        ("Micah", "Warm, youthful American male voice"),
+        ("Mika", "Neutral, clean and balanced voice"),
+        ("Miles", "Relaxed, conversational American male voice"),
+        ("Mirko", "Direct, resonant European male voice"),
+        ("Morwenna_of_the_Deep", "Mysterious, ethereal siren/spirit character voice"),
+        ("Nele", "Soft, thoughtful German female voice"),
+        ("Nerea", "Lively, clear Spanish female voice"),
+        ("Nico", "Young, friendly conversational male voice"),
+        ("Ninon", "Intimate, warm French female voice"),
+        ("Noa", "Calm, smooth female voice (closest to Nova)"),
+        ("Noémie", "Gentle, polished French female voice"),
+        ("Nuno", "Articulate Portuguese male voice"),
+        ("Old_Mortlake", "Cryptic, ancient raspy elder character voice"),
+        ("Orianne", "Graceful, melodious French female voice"),
+        ("Otávio", "Friendly, warm Brazilian Portuguese male voice"),
+        ("Pippa", "Cheerful, enthusiastic British female voice"),
+        ("Preston", "Refined, articulate American male voice"),
+        ("Rafaela", "Sweet, expressive Brazilian female voice"),
+        ("Rebeca", "Smooth, professional Spanish female voice"),
+        ("Regina", "Regal, commanding mature female voice"),
+        ("Russell", "Dependable, mature American male voice"),
+        ("Sir_Bramwell", "Aristocratic, theatrical British gentleman character voice"),
+        ("Solène", "Calm, sophisticated French female voice"),
+        ("Spencer", "Refined British human male voice"),
+        ("Svea", "Clear, melodious Nordic female voice"),
+        ("Teddy", "Expressive British human male voice"),
+        ("The_Snow_Queen", "Icy, regal and commanding female fantasy character voice"),
+        ("The_Thing_Under_the_Stairs", "Ominous, creaky creature character voice"),
+        ("Tiphaine", "Gentle, breezy French female voice"),
+        ("Toby", "Youthful, engaging British human male voice"),
+        ("Trevor", "Friendly, approachable American male voice"),
+        ("Ulises", "Passionate, vibrant Spanish male voice"),
+        ("Vitor", "Warm, engaging Portuguese male voice"),
+        ("Vyrmathrax_the_Ancient", "Thundering dragon/ancient titan character voice"),
+        ("Ximena", "Bright, lyrical Spanish female voice"),
+        ("Yael", "Gentle, introspective female voice"),
+        ("Zoey", "Bright, bubbly American female voice"),
+    ];
+
+    for (name, desc) in voices {
+        out.push_str(&format!("- {}: {}\n", name, desc));
+    }
+    out
 }

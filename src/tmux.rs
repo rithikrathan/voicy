@@ -107,3 +107,31 @@ pub fn send_keys_to_pane(target: &str, text: &str, press_enter: bool) -> Result<
 
     Ok(())
 }
+
+/// Sends a special key name (e.g. Enter, Backspace, Arrow keys, C-c) to the tmux pane
+pub fn send_raw_keys(target: &str, key: &str) -> Result<(), String> {
+    let tmux_key = match key {
+        "Enter" => "Enter",
+        "Backspace" => "BSpace",
+        "Tab" => "Tab",
+        "Escape" => "Escape",
+        "ArrowUp" | "Up" => "Up",
+        "ArrowDown" | "Down" => "Down",
+        "ArrowLeft" | "Left" => "Left",
+        "ArrowRight" | "Right" => "Right",
+        "C-c" | "ctrl+c" => "C-c",
+        "C-d" | "ctrl+d" => "C-d",
+        "C-z" | "ctrl+z" => "C-z",
+        other => other,
+    };
+
+    let status = Command::new("tmux")
+        .args(["send-keys", "-t", target, tmux_key])
+        .status()
+        .map_err(|e| format!("Failed to send key '{}': {}", key, e))?;
+
+    if !status.success() {
+        return Err(format!("tmux send-keys key failed with exit code {:?}", status.code()));
+    }
+    Ok(())
+}
