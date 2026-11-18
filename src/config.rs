@@ -402,6 +402,8 @@ pub fn get_target_file_path() -> PathBuf {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TargetState {
     pub target: Option<String>,
+    #[serde(default)]
+    pub slots: HashMap<u8, String>,
 }
 
 impl TargetState {
@@ -417,14 +419,32 @@ impl TargetState {
         TargetState::default()
     }
 
-    pub fn save(target: Option<&str>) {
+    pub fn save(&self) {
         let path = get_target_file_path();
-        let state = TargetState {
-            target: target.map(|s| s.to_string()),
-        };
-        if let Ok(json_str) = serde_json::to_string_pretty(&state) {
+        if let Ok(json_str) = serde_json::to_string_pretty(self) {
             let _ = fs::write(path, json_str);
         }
+    }
+
+    pub fn set_primary(&mut self, target: Option<&str>) {
+        self.target = target.map(|s| s.to_string());
+        self.save();
+    }
+
+    pub fn set_slot(&mut self, slot: u8, target: Option<&str>) {
+        match target {
+            Some(t) if !t.is_empty() && t != "none" => {
+                self.slots.insert(slot, t.to_string());
+            }
+            _ => {
+                self.slots.remove(&slot);
+            }
+        }
+        self.save();
+    }
+
+    pub fn get_slot(&self, slot: u8) -> Option<&String> {
+        self.slots.get(&slot)
     }
 }
 

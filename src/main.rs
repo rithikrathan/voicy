@@ -49,6 +49,9 @@ enum Commands {
         /// Prepend /btw with agent instruction context
         #[arg(short, long)]
         btw: bool,
+        /// Target slot number (1-10)
+        #[arg(short, long)]
+        slot: Option<u8>,
     },
     /// Push-to-talk: stop recording, transcribe, and deliver text
     Stop,
@@ -60,13 +63,18 @@ enum Commands {
         /// Prepend /btw with agent instruction context
         #[arg(short, long)]
         btw: bool,
+        /// Target slot number (1-10)
+        #[arg(short, long)]
+        slot: Option<u8>,
     },
     /// Cancel the topmost active task (LIFO: active recording first, or in-flight transcription)
     Cancel,
-    /// Inspect or set the active tmux target pane ('here', 'clear', 'null', or '<target>')
+    /// Inspect or set tmux target panes ('here', 'clear', 'null', or '<target>'), with optional slot (1-10)
     Target {
         /// Target destination e.g. 'here', 'clear', 'null', 'none', or 'session:window.pane'
         destination: Option<String>,
+        /// Optional target slot (1-10). If omitted, sets or queries primary target.
+        slot: Option<u8>,
     },
     /// Query daemon status
     Status {
@@ -124,11 +132,13 @@ enum WorkerTask {
         samples: Vec<f32>,
         is_dictate: bool,
         is_btw: bool,
+        target_override: Option<String>,
         task_id: u64,
     },
     CommitSession {
         is_dictate: bool,
         is_btw: bool,
+        target_override: Option<String>,
         task_id: u64,
     },
 }
@@ -141,15 +151,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Daemon { model_dir } => {
             run_daemon(model_dir, socket_path)?;
         }
-        Commands::Start { dictate, btw } => {
-            let cmd = if btw {
-                "START:BTW"
+        Commands::Start { dictate, btw, slot } => {
+            let mut parts = vec!["START"];
+            if btw {
+                parts.push("BTW");
             } else if dictate {
-                "START:DICTATE"
-            } else {
-                "START"
-            };
-            match ipc::send_command(&socket_path, cmd) {
+                parts.push("DICTATE");
+            }
+            let slot_str = slot.map(|s| format!("SLOT:{}", s));
+            let mut cmd = parts.join(":");
+            if let Some(ref s) = slot_str {
+                cmd = format!("{}:{}", cmd, s);
+            }
+            match ipc::send_command(&socket_path, &cmd) {
                 Ok(resp) => {
                     let r = resp.trim();
                     if r == "recording" {
@@ -176,15 +190,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Err(e) => eprintln!("Error communicating with voicy daemon: {}", e),
         },
-        Commands::Toggle { dictate, btw } => {
-            let cmd = if btw {
-                "TOGGLE:BTW"
+        Commands::Toggle { dictate, btw, slot } => {
+            let mut parts = vec!["TOGGLE"];
+            if btw {
+                parts.push("BTW");
             } else if dictate {
-                "TOGGLE:DICTATE"
-            } else {
-                "TOGGLE"
-            };
-            match ipc::send_command(&socket_path, cmd) {
+                parts.push("DICTATE");
+            }
+            let slot_str = slot.map(|s| format!("SLOT:{}", s));
+            let mut cmd = parts.join(":");
+            if let Some(ref s) = slot_str {
+                cmd = format!("{}:{}", cmd, s);
+            }
+            match ipc::send_command(&socket_path, &cmd) {
                 Ok(resp) => {
                     let r = resp.trim();
                     if r == "recording" {
@@ -213,15 +231,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Err(e) => eprintln!("Error communicating with voicy daemon: {}", e),
         },
-        Commands::Target { destination } => {
+        Commands::Target { destination, slot } => {
             let cmd = match destination {
                 Some(ref dest) => {
                     let trimmed = dest.trim();
-                    if trimmed.eq_ignore_ascii_case("here") {
+                    let resolved = if trimmed.eq_ignore_ascii_case("here") {
                         if let Some(pane_id) = tmux::get_env_tmux_pane() {
-                            format!("TARGET:{}", pane_id)
+                            pane_id
                         } else if let Some(pane_id) = tmux::get_active_client_pane() {
-                            format!("TARGET:{}", pane_id)
+                            pane_id
                         } else {
                             eprintln!("Error: Cannot resolve current tmux pane (not in tmux?)");
                             return Ok(());
@@ -230,12 +248,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         || trimmed.eq_ignore_ascii_case("null")
                         || trimmed.eq_ignore_ascii_case("none")
                     {
-                        "TARGET:none".to_string()
+                        "none".to_string()
+                    } else if let Some(pane_id) = tmux::resolve_target_to_pane_id(trimmed) {
+                        pane_id
                     } else {
-                        format!("TARGET:{}", trimmed)
+                        trimmed.to_string()
+                    };
+
+                    match slot {
+                        Some(s) => format!("TARGET:{}:SLOT:{}", resolved, s),
+                        None => format!("TARGET:{}", resolved),
                     }
                 }
-                None => "TARGET".to_string(),
+                None => match slot {
+                    Some(s) => format!("TARGET:SLOT:{}", s),
+                    None => "TARGET".to_string(),
+                },
             };
 
             match ipc::send_command(&socket_path, &cmd) {
@@ -483,6 +511,7 @@ fn start_worker_thread(
                     samples: raw_samples,
                     is_dictate,
                     is_btw,
+                    target_override,
                     task_id,
                 } => {
                     // Cancellation check
@@ -538,9 +567,11 @@ fn start_worker_thread(
                                 println!("[voicy] [worker] Chunk Result: \"{}\"", trimmed);
 
                                 if !is_btw {
-                                    let target_lock = active_target.lock().ok();
-                                    let target_str =
-                                        target_lock.as_deref().and_then(|opt| opt.as_deref());
+                                    let effective_target = match target_override.as_deref() {
+                                        Some(t) => Some(t.to_string()),
+                                        None => active_target.lock().ok().and_then(|t| t.clone()),
+                                    };
+                                    let target_str = effective_target.as_deref();
 
                                     is_typing.store(true, Ordering::SeqCst);
                                     output::deliver_text(
@@ -563,6 +594,7 @@ fn start_worker_thread(
                 WorkerTask::CommitSession {
                     is_dictate,
                     is_btw,
+                    target_override,
                     task_id,
                 } => {
                     if task_id <= canceled_task_id.load(Ordering::SeqCst) {
@@ -576,6 +608,12 @@ fn start_worker_thread(
 
                     let full_session_text = session_transcript.join(" ");
                     session_transcript.clear();
+
+                    let effective_target = match target_override.as_deref() {
+                        Some(t) => Some(t.to_string()),
+                        None => active_target.lock().ok().and_then(|t| t.clone()),
+                    };
+                    let target_str = effective_target.as_deref();
 
                     if !full_session_text.trim().is_empty() {
                         let trimmed_session = full_session_text.trim();
@@ -591,8 +629,6 @@ fn start_worker_thread(
 
                         // If in BTW mode, deliver the formatted /btw message before pressing enter
                         if is_btw {
-                            let target_lock = active_target.lock().ok();
-                            let target_str = target_lock.as_deref().and_then(|opt| opt.as_deref());
                             is_typing.store(true, Ordering::SeqCst);
                             output::deliver_text_with_mode(
                                 trimmed_session,
@@ -607,9 +643,6 @@ fn start_worker_thread(
                     }
 
                     // Press Enter on target window / tmux pane
-                    let target_lock = active_target.lock().ok();
-                    let target_str = target_lock.as_deref().and_then(|opt| opt.as_deref());
-
                     is_typing.store(true, Ordering::SeqCst);
                     output::press_enter_key(is_dictate, target_str);
                     is_typing.store(false, Ordering::SeqCst);
@@ -740,6 +773,7 @@ fn run_daemon(
 
     let mut active_recording_is_dictate = false;
     let mut active_recording_is_btw = false;
+    let mut active_recording_target: Option<String> = None;
     let mut vad_forwarder_thread: Option<std::thread::JoinHandle<()>> = None;
 
     for stream in listener.incoming() {
@@ -762,53 +796,86 @@ fn run_daemon(
         }
 
         let command = line.trim();
-        let is_btw_cmd = command.ends_with(":BTW");
-        let is_dictate_cmd = command.ends_with(":DICTATE");
-        let base_cmd = if is_btw_cmd {
-            command.strip_suffix(":BTW").unwrap_or(command)
-        } else if is_dictate_cmd {
-            command.strip_suffix(":DICTATE").unwrap_or(command)
-        } else {
-            command
-        };
+        let mut slot_opt: Option<u8> = None;
+        let mut clean_cmd = command.to_string();
+
+        if let Some(pos) = clean_cmd.rfind(":SLOT:") {
+            let slot_str = &clean_cmd[pos + 6..];
+            if let Ok(s) = slot_str.parse::<u8>() {
+                slot_opt = Some(s);
+            }
+            clean_cmd.truncate(pos);
+        }
+
+        let is_btw_cmd = clean_cmd.ends_with(":BTW");
+        if is_btw_cmd {
+            clean_cmd.truncate(clean_cmd.len() - 4);
+        }
+        let is_dictate_cmd = clean_cmd.ends_with(":DICTATE");
+        if is_dictate_cmd {
+            clean_cmd.truncate(clean_cmd.len() - 8);
+        }
+        let base_cmd = clean_cmd.as_str();
 
         if base_cmd.starts_with("TARGET") {
+            let mut state = config::TargetState::load();
             let mut parts = base_cmd.splitn(2, ':');
             let _ = parts.next();
             if let Some(new_target) = parts.next() {
                 let trimmed = new_target.trim();
                 let mut lock = active_target.lock().unwrap();
-                if trimmed == "none" || trimmed.is_empty() {
-                    *lock = None;
-                    config::TargetState::save(None);
-                    println!(
-                        "[voicy] Active target cleared (null). Defaulting to dictation fallback."
-                    );
-                    ws_server_instance.broadcast(&ws_server::DaemonOutMessage::StatusUpdate {
-                        target: None,
-                        is_btw: false,
-                    });
-                    let _ = stream
-                        .write_all(b"Target cleared (null). Defaulting to dictation fallback.\n");
+                if let Some(slot) = slot_opt {
+                    if trimmed == "none" || trimmed.is_empty() {
+                        state.set_slot(slot, None);
+                        let _ = stream.write_all(format!("Target slot {} cleared.\n", slot).as_bytes());
+                    } else {
+                        state.set_slot(slot, Some(trimmed));
+                        let _ = stream.write_all(format!("Target slot {} set to: '{}'\n", slot, trimmed).as_bytes());
+                    }
                 } else {
-                    *lock = Some(trimmed.to_string());
-                    config::TargetState::save(Some(trimmed));
-                    println!("[voicy] Active target set to: '{}'", trimmed);
-                    ws_server_instance.broadcast(&ws_server::DaemonOutMessage::StatusUpdate {
-                        target: Some(trimmed.to_string()),
-                        is_btw: false,
-                    });
-                    let _ = stream
-                        .write_all(format!("Active target set to: '{}'\n", trimmed).as_bytes());
+                    if trimmed == "none" || trimmed.is_empty() {
+                        *lock = None;
+                        state.set_primary(None);
+                        println!(
+                            "[voicy] Active target cleared (null). Defaulting to dictation fallback."
+                        );
+                        ws_server_instance.broadcast(&ws_server::DaemonOutMessage::StatusUpdate {
+                            target: None,
+                            is_btw: false,
+                        });
+                        let _ = stream
+                            .write_all(b"Target cleared (null). Defaulting to dictation fallback.\n");
+                    } else {
+                        *lock = Some(trimmed.to_string());
+                        state.set_primary(Some(trimmed));
+                        println!("[voicy] Active target set to: '{}'", trimmed);
+                        ws_server_instance.broadcast(&ws_server::DaemonOutMessage::StatusUpdate {
+                            target: Some(trimmed.to_string()),
+                            is_btw: false,
+                        });
+                        let _ = stream
+                            .write_all(format!("Active target set to: '{}'\n", trimmed).as_bytes());
+                    }
                 }
             } else {
-                let lock = active_target.lock().unwrap();
-                match lock.as_deref() {
-                    Some(t) => {
-                        let _ = stream.write_all(format!("Target: {}\n", t).as_bytes());
+                if let Some(slot) = slot_opt {
+                    match state.get_slot(slot) {
+                        Some(t) => {
+                            let _ = stream.write_all(format!("Target slot {}: {}\n", slot, t).as_bytes());
+                        }
+                        None => {
+                            let _ = stream.write_all(format!("Target slot {}: none\n", slot).as_bytes());
+                        }
                     }
-                    None => {
-                        let _ = stream.write_all(b"Target: null (dictation fallback)\n");
+                } else {
+                    let lock = active_target.lock().unwrap();
+                    match lock.as_deref() {
+                        Some(t) => {
+                            let _ = stream.write_all(format!("Target: {}\n", t).as_bytes());
+                        }
+                        None => {
+                            let _ = stream.write_all(b"Target: null (dictation fallback)\n");
+                        }
                     }
                 }
             }
@@ -818,14 +885,31 @@ fn run_daemon(
 
         match base_cmd {
             "START" => {
+                if let Some(slot) = slot_opt {
+                    let state = config::TargetState::load();
+                    if state.get_slot(slot).is_none() {
+                        let msg = format!("There are no targets attached to target {}.", slot);
+                        println!("[voicy] {}", msg);
+                        if let Some(ref tts) = tts_manager {
+                            tts.enqueue_speech(msg.clone(), None, None);
+                        }
+                        let _ = stream.write_all(format!("error: {}\n", msg).as_bytes());
+                        let _ = stream.flush();
+                        continue;
+                    }
+                    active_recording_target = state.get_slot(slot).cloned();
+                } else {
+                    active_recording_target = None;
+                }
+
                 if recorder.is_recording() {
                     let _ = stream.write_all(b"already_recording\n");
                 } else {
                     active_recording_is_dictate = is_dictate_cmd;
                     active_recording_is_btw = is_btw_cmd;
                     println!(
-                        "[voicy] Start live dictation recording (dictate={}, btw={})...",
-                        active_recording_is_dictate, active_recording_is_btw
+                        "[voicy] Start live dictation recording (dictate={}, btw={}, target={:?})...",
+                        active_recording_is_dictate, active_recording_is_btw, active_recording_target
                     );
                     sink::pause_media();
 
@@ -841,6 +925,7 @@ fn run_daemon(
                             let tc = Arc::clone(&task_counter);
                             let dictate_mode = active_recording_is_dictate;
                             let btw_mode = active_recording_is_btw;
+                            let target_override = active_recording_target.clone();
 
                             vad_forwarder_thread = Some(std::thread::spawn(move || {
                                 while let Ok(chunk) = chunk_rx.recv() {
@@ -849,6 +934,7 @@ fn run_daemon(
                                         samples: chunk,
                                         is_dictate: dictate_mode,
                                         is_btw: btw_mode,
+                                        target_override: target_override.clone(),
                                         task_id: tid,
                                     });
                                 }
@@ -881,6 +967,7 @@ fn run_daemon(
                     let _ = tx.send(WorkerTask::CommitSession {
                         is_dictate: active_recording_is_dictate,
                         is_btw: active_recording_is_btw,
+                        target_override: active_recording_target.take(),
                         task_id: tid,
                     });
 
@@ -906,17 +993,35 @@ fn run_daemon(
                     let _ = tx.send(WorkerTask::CommitSession {
                         is_dictate: active_recording_is_dictate,
                         is_btw: active_recording_is_btw,
+                        target_override: active_recording_target.take(),
                         task_id: tid,
                     });
 
                     let _ = stream.write_all(b"queued\n");
                     let _ = stream.flush();
                 } else {
+                    if let Some(slot) = slot_opt {
+                        let state = config::TargetState::load();
+                        if state.get_slot(slot).is_none() {
+                            let msg = format!("There are no targets attached to target {}.", slot);
+                            println!("[voicy] {}", msg);
+                            if let Some(ref tts) = tts_manager {
+                                tts.enqueue_speech(msg.clone(), None, None);
+                            }
+                            let _ = stream.write_all(format!("error: {}\n", msg).as_bytes());
+                            let _ = stream.flush();
+                            continue;
+                        }
+                        active_recording_target = state.get_slot(slot).cloned();
+                    } else {
+                        active_recording_target = None;
+                    }
+
                     active_recording_is_dictate = is_dictate_cmd;
                     active_recording_is_btw = is_btw_cmd;
                     println!(
-                        "[voicy] Start live dictation (toggle, dictate={}, btw={}).",
-                        active_recording_is_dictate, active_recording_is_btw
+                        "[voicy] Start live dictation (toggle, dictate={}, btw={}, target={:?}).",
+                        active_recording_is_dictate, active_recording_is_btw, active_recording_target
                     );
                     sink::pause_media();
 
@@ -932,6 +1037,7 @@ fn run_daemon(
                             let tc = Arc::clone(&task_counter);
                             let dictate_mode = active_recording_is_dictate;
                             let btw_mode = active_recording_is_btw;
+                            let target_override = active_recording_target.clone();
 
                             vad_forwarder_thread = Some(std::thread::spawn(move || {
                                 while let Ok(chunk) = chunk_rx.recv() {
@@ -940,6 +1046,7 @@ fn run_daemon(
                                         samples: chunk,
                                         is_dictate: dictate_mode,
                                         is_btw: btw_mode,
+                                        target_override: target_override.clone(),
                                         task_id: tid,
                                     });
                                 }

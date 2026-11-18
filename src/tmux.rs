@@ -65,6 +65,21 @@ pub fn get_active_client_pane() -> Option<String> {
     best_pane.map(|(_, pane_id)| pane_id)
 }
 
+/// Resolves a target expression (like "session:window", "window.pane", or "%pane_id") into its unique %pane_id
+pub fn resolve_target_to_pane_id(target: &str) -> Option<String> {
+    let output = Command::new("tmux")
+        .args(["display-message", "-t", target, "-p", "#{pane_id}"])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !pane_id.is_empty() {
+            return Some(pane_id);
+        }
+    }
+    None
+}
+
 /// Verifies whether a specific pane or session target currently exists
 pub fn is_pane_alive(target: &str) -> bool {
     Command::new("tmux")
