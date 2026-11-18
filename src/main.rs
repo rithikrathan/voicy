@@ -653,7 +653,8 @@ fn run_daemon(
     let is_typing = Arc::new(AtomicBool::new(false));
     let task_counter = Arc::new(AtomicU64::new(0));
     let canceled_task_id = Arc::new(AtomicU64::new(0));
-    let active_target = Arc::new(Mutex::new(None::<String>));
+    let initial_target_state = config::TargetState::load();
+    let active_target = Arc::new(Mutex::new(initial_target_state.target));
 
     let shared_state = Arc::new(ws_server::SharedDaemonState {
         client_mode_enabled: AtomicBool::new(true),
@@ -779,6 +780,7 @@ fn run_daemon(
                 let mut lock = active_target.lock().unwrap();
                 if trimmed == "none" || trimmed.is_empty() {
                     *lock = None;
+                    config::TargetState::save(None);
                     println!(
                         "[voicy] Active target cleared (null). Defaulting to dictation fallback."
                     );
@@ -790,6 +792,7 @@ fn run_daemon(
                         .write_all(b"Target cleared (null). Defaulting to dictation fallback.\n");
                 } else {
                     *lock = Some(trimmed.to_string());
+                    config::TargetState::save(Some(trimmed));
                     println!("[voicy] Active target set to: '{}'", trimmed);
                     ws_server_instance.broadcast(&ws_server::DaemonOutMessage::StatusUpdate {
                         target: Some(trimmed.to_string()),

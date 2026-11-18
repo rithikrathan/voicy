@@ -19,8 +19,9 @@ These instructions apply whenever a prompt arrives with `/btw` or voice instruct
 
 ## 3. Spoken Responses & TTS
 - When instructed to respond via voice/speech:
-  - Use the `voicy-tts` MCP tool if available.
-  - If the MCP tool fails or is unavailable, do NOT attempt to inspect, debug, or fix it. Immediately fall back to `voicy speak "<text>"` (located in `~/.local/bin/voicy`).
+  - Try using the TTS MCP tool (`edge-tts` or `voicy-tts`) first.
+  - If the MCP tool fails or is unavailable, do NOT attempt to inspect, debug, or fix it. Immediately fall back to `voicy speak "<text>"` (located in `~/.local/bin/voicy`) for that turn.
+  - On subsequent turns, always try the MCP tool again first (treat any MCP failure as a one-off harness hiccup and do not permanently abandon MCP).
 - Never print duplicated text to the screen when using TTS.
 
 ## 4. Execution Style

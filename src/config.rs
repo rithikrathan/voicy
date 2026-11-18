@@ -6,6 +6,7 @@ use std::fs;
 use std::path::PathBuf;
 
 pub const DEFAULT_SOCKET_NAME: &str = "voicy.sock";
+pub const DEFAULT_TARGET_FILENAME: &str = "voicy_target.json";
 pub const DEFAULT_CONFIG_FILENAME: &str = "config.toml";
 
 pub fn get_default_model_dir(model_name: &str) -> PathBuf {
@@ -387,6 +388,43 @@ pub fn get_socket_path() -> PathBuf {
         PathBuf::from(runtime_dir).join(DEFAULT_SOCKET_NAME)
     } else {
         PathBuf::from("/tmp").join(DEFAULT_SOCKET_NAME)
+    }
+}
+
+pub fn get_target_file_path() -> PathBuf {
+    if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+        PathBuf::from(runtime_dir).join(DEFAULT_TARGET_FILENAME)
+    } else {
+        PathBuf::from("/tmp").join(DEFAULT_TARGET_FILENAME)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TargetState {
+    pub target: Option<String>,
+}
+
+impl TargetState {
+    pub fn load() -> Self {
+        let path = get_target_file_path();
+        if path.exists() {
+            if let Ok(content) = fs::read_to_string(&path) {
+                if let Ok(state) = serde_json::from_str::<TargetState>(&content) {
+                    return state;
+                }
+            }
+        }
+        TargetState::default()
+    }
+
+    pub fn save(target: Option<&str>) {
+        let path = get_target_file_path();
+        let state = TargetState {
+            target: target.map(|s| s.to_string()),
+        };
+        if let Ok(json_str) = serde_json::to_string_pretty(&state) {
+            let _ = fs::write(path, json_str);
+        }
     }
 }
 
