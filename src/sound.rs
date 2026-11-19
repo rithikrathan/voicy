@@ -27,6 +27,7 @@ pub enum SoundCue {
     Start,
     Delivered,
     TtsStart,
+    Rejected,
 }
 
 struct SoundPlayer {
@@ -42,6 +43,7 @@ fn play_fallback(cue: SoundCue) {
         SoundCue::Start => "agentPop.mp3",
         SoundCue::Delivered => "delivered.mp3",
         SoundCue::TtsStart => "tts_start.wav",
+        SoundCue::Rejected => "timeout.mp3",
     };
     let path = get_sound_path(filename);
     if path.exists() {
@@ -83,6 +85,7 @@ fn init_player() -> Option<SoundPlayer> {
                     SoundCue::Start => "agentPop.mp3",
                     SoundCue::Delivered => "delivered.mp3",
                     SoundCue::TtsStart => "tts_start.wav",
+                    SoundCue::Rejected => "timeout.mp3",
                 };
 
                 if let Some(bytes) = load_sound_bytes(filename) {
@@ -95,6 +98,7 @@ fn init_player() -> Option<SoundPlayer> {
                                         SoundCue::Start => 0.80,
                                         SoundCue::Delivered => 0.26,
                                         SoundCue::TtsStart => 0.60,
+                                        SoundCue::Rejected => 0.75,
                                     };
                                     sink.set_volume(volume);
                                     sink.append(source);
@@ -139,6 +143,11 @@ pub fn play_delivered_sound() {
 /// Plays the TTS start sound cue
 pub fn play_tts_start_sound() {
     play_cue(SoundCue::TtsStart);
+}
+
+/// Plays the rejected / timeout error chime
+pub fn play_rejected_sound() {
+    play_cue(SoundCue::Rejected);
 }
 
 #[cfg(test)]

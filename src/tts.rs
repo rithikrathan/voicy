@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use crate::sink::{pause_media, resume_media};
 
 struct SynthesisJob {
@@ -178,13 +179,22 @@ impl TtsManager {
 
             let mut media_is_paused = false;
 
-            while let Ok(job) = playback_rx.recv() {
+            loop {
+                // Wait for the next playback job with a timeout so we can resume media when idle
+                let job = match playback_rx.recv_timeout(Duration::from_millis(300)) {
+                    Ok(j) => j,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if media_is_paused {
+                            resume_media();
+                            media_is_paused = false;
+                        }
+                        continue;
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                };
+
                 if job.id <= cancel_play_clone.load(Ordering::SeqCst) {
                     println!("[voicy] [tts] Discarding queued playback for job #{}.", job.id);
-                    if media_is_paused && playback_rx.try_recv().is_err() {
-                        resume_media();
-                        media_is_paused = false;
-                    }
                     continue;
                 }
 
@@ -207,10 +217,6 @@ impl TtsManager {
                     Err(e) => {
                         eprintln!("[voicy] [tts] Could not create rodio Sink: {}", e);
                         isp_clone.store(false, Ordering::SeqCst);
-                        if media_is_paused && playback_rx.try_recv().is_err() {
-                            resume_media();
-                            media_is_paused = false;
-                        }
                         continue;
                     }
                 };
@@ -234,14 +240,6 @@ impl TtsManager {
                 }
                 isp_clone.store(false, Ordering::SeqCst);
                 println!("[voicy] [tts] Finished playback for job #{}.", job.id);
-
-                // If playback queue is drained, resume media playback
-                if playback_rx.try_recv().is_err() {
-                    if media_is_paused {
-                        resume_media();
-                        media_is_paused = false;
-                    }
-                }
             }
 
             if media_is_paused {

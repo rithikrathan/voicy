@@ -69,12 +69,15 @@ enum Commands {
     },
     /// Cancel the topmost active task (LIFO: active recording first, or in-flight transcription)
     Cancel,
-    /// Inspect or set tmux target panes ('here', 'clear', 'null', or '<target>'), with optional slot (1-10)
+    /// Inspect or set tmux target panes ('here', 'clear', 'null', or '<target>'), with optional slot (1-10) or special targets
     Target {
         /// Target destination e.g. 'here', 'clear', 'null', 'none', or 'session:window.pane'
         destination: Option<String>,
         /// Optional target slot (1-10). If omitted, sets or queries primary target.
         slot: Option<u8>,
+        /// Special rain target trigger
+        #[arg(long)]
+        rain: bool,
     },
     /// Query daemon status
     Status {
@@ -231,7 +234,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Err(e) => eprintln!("Error communicating with voicy daemon: {}", e),
         },
-        Commands::Target { destination, slot } => {
+        Commands::Target { destination, slot, rain } => {
+            if rain {
+                match ipc::send_command(&socket_path, "TARGET:RAIN") {
+                    Ok(resp) => print!("{}", resp),
+                    Err(e) => eprintln!("Error communicating with voicy daemon: {}", e),
+                }
+                return Ok(());
+            }
+
             let cmd = match destination {
                 Some(ref dest) => {
                     let trimmed = dest.trim();
@@ -817,6 +828,14 @@ fn run_daemon(
         }
         let base_cmd = clean_cmd.as_str();
 
+        if base_cmd == "TARGET:RAIN" {
+            println!("[voicy] Rain target signal received! Broadcasting special message.");
+            event_broadcaster.broadcast_raw("{\"hala rain!\"}");
+            let _ = stream.write_all(b"{\"hala rain!\"}\n");
+            let _ = stream.flush();
+            continue;
+        }
+
         if base_cmd.starts_with("TARGET") {
             let mut state = config::TargetState::load();
             let mut parts = base_cmd.splitn(2, ':');
@@ -890,9 +909,7 @@ fn run_daemon(
                     if state.get_slot(slot).is_none() {
                         let msg = format!("There are no targets attached to target {}.", slot);
                         println!("[voicy] {}", msg);
-                        if let Some(ref tts) = tts_manager {
-                            tts.enqueue_speech(msg.clone(), None, None);
-                        }
+                        sound::play_rejected_sound();
                         let _ = stream.write_all(format!("error: {}\n", msg).as_bytes());
                         let _ = stream.flush();
                         continue;
@@ -1005,9 +1022,7 @@ fn run_daemon(
                         if state.get_slot(slot).is_none() {
                             let msg = format!("There are no targets attached to target {}.", slot);
                             println!("[voicy] {}", msg);
-                            if let Some(ref tts) = tts_manager {
-                                tts.enqueue_speech(msg.clone(), None, None);
-                            }
+                            sound::play_rejected_sound();
                             let _ = stream.write_all(format!("error: {}\n", msg).as_bytes());
                             let _ = stream.flush();
                             continue;
